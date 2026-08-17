@@ -10,4 +10,8 @@ dependencies = [
     "requests>=2.32",
     "python-dotenv>=1.0",
     "pydantic>=2.9",
+    "payflow-backend",
 ]
+
+[tool.uv.sources]
+payflow-backend = { git = "https://github.com/park-song-jungyujin/payflow-backend", rev = "v0.1.0" }

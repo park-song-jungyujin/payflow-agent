@@ -24,7 +24,10 @@ ADK 에이전트 **셋**. 각 툴 2~4개. 디렉터리가 곧 소유 경계다.
 
 - **에이전트끼리 직접 호출하기** — 셋 다 `api`가 Cloud Tasks로 부른다. 결과는 Firestore draft로만
 - 에이전트를 넷 이상으로 늘리기 — 셋이 트랙 경계와 1:1이다
-- Firestore SDK 직접 쓰기 — `api`가 제공하는 툴을 통해서만 접근한다
+- Firestore SDK 직접 쓰기 — `api`가 제공하는 툴을 통해서만 접근한다.
+  **예외: `agent_sessions` 컬렉션.** 청구자·집행자의 세션(대화) 이어가기용으로,
+  `shared/memory.py`를 통해서만 직접 읽고 쓴다. 다른 컬렉션에는 여전히 안 쓴다.
+  자세한 내용은 `docs/rules/schema-contract.md` §2 `agent_sessions`
 - `web`이나 사용자에게 직접 말 걸기 — Slack 발송도 `api`가 한다
 - 영수증 파싱을 ADK에 태우기 — 단발 호출이라 세션·툴루프 오버헤드만 는다
 - 금액 합산이나 매칭 — 코드 소관이다
@@ -46,8 +49,11 @@ ADK 에이전트 **셋**. 각 툴 2~4개. 디렉터리가 곧 소유 경계다.
 
 ## 모델 · 세션
 
-Vertex AI 경유 (`GOOGLE_GENAI_USE_VERTEXAI=1`). 세션은 `InMemorySessionService`.
+Vertex AI 경유 (`GOOGLE_GENAI_USE_VERTEXAI=1`). ADK `Runner` 세션은 `InMemorySessionService`.
 모델 ID는 환경변수. 하드코딩하지 않는다.
+
+청구자·집행자의 세션(대화) 이어가기는 `InMemorySessionService`가 아니라 `shared/memory.py`
+(Firestore `agent_sessions`)가 한다 — `docs/rules/agent-tools.md` "모델·세션" 참조.
 
 ## 공통 규칙
 

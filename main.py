@@ -4,7 +4,8 @@
 만든 OIDC 토큰만 통과시킨다. 응답 본문은 의미가 없다: 결과는 agent_drafts에 쓰고
 200만 돌려준다 — api가 draft를 읽어간다.
 
-claimant/executor 라우트는 자리만 잡아둔다. 로직은 각 트랙(A/B) 담당이다.
+claimant 라우트는 자리만 잡아둔다(Track A). executor는 이상징후 서술만 구현했다 —
+자연어 → 정산 필터 변환은 별도 배선이 필요해 범위 밖이다(executor/agent.py 참조).
 """
 
 import os
@@ -20,7 +21,9 @@ from google.auth.transport import requests as google_requests  # noqa: E402
 from google.genai import types  # noqa: E402
 from google.oauth2 import id_token  # noqa: E402
 
+from executor.agent import root_agent as executor_agent  # noqa: E402
 from safety.agent import root_agent as safety_agent  # noqa: E402
+from shared.memory import AgentType, append_turn, get_or_create_session  # noqa: E402
 
 app = FastAPI()
 _google_request = google_requests.Request()
@@ -47,9 +50,19 @@ def health():
     return {"status": "ok"}
 
 
-async def _run_once(agent, session_id: str, prompt: str) -> None:
+async def _run_once(agent, session_id: str, prompt: str) -> str:
     """세션은 매 요청마다 새로 만든다 — architecture.md: ADK 세션은
-    InMemorySessionService, 재시작 후 살아남을 필요가 없다."""
+    InMemorySessionService, 재시작 후 살아남을 필요가 없다.
+
+    이 session_id는 ADK Runner가 요구하는 기술적인 값(task_id를 넘긴다)이지,
+    agent_sessions(Firestore)의 세션 개념과는 별개다 — 그쪽은 entity_id 기준
+    (session_id_for)으로 main.py가 직접 관리한다.
+
+    마지막 텍스트 이벤트를 모아 돌려준다. 툴 호출 이벤트는 text가 없어 자연히
+    건너뛰므로, 툴을 부른 뒤 모델이 남긴 마무리 텍스트만 남는다. 안전 확인
+    에이전트는 이 반환값을 쓰지 않는다 — 결과가 이미 submit_risk_report 툴로
+    api에 써졌기 때문이다. 집행자 에이전트는 agent_sessions에 OUTPUT 턴으로
+    남기려고 이 값을 쓴다."""
     session_service = InMemorySessionService()
     await session_service.create_session(
         app_name=APP_NAME, user_id="system", session_id=session_id
@@ -57,10 +70,15 @@ async def _run_once(agent, session_id: str, prompt: str) -> None:
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
 
     content = types.Content(role="user", parts=[types.Part(text=prompt)])
-    async for _event in runner.run_async(
+    final_text = ""
+    async for event in runner.run_async(
         user_id="system", session_id=session_id, new_message=content
     ):
-        pass  # 결과는 안전 확인 에이전트가 submit_risk_report 툴로 이미 api에 썼다.
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if getattr(part, "text", None):
+                    final_text = part.text
+    return final_text
 
 
 @app.post("/agents/safety/report")
@@ -92,6 +110,56 @@ def claimant_review(body: dict, authorization: str = Header(default="")):
 
 
 @app.post("/agents/executor/analyze")
-def executor_analyze(body: dict, authorization: str = Header(default="")):
+async def executor_analyze(body: dict, authorization: str = Header(default="")):
+    """schema-contract.md §9 — 이상징후 서술만 다룬다. 자연어 → 정산 필터 변환은
+    settlement_run_id가 아직 없는 시점의 호출이라 이 라우트 범위 밖이다."""
     _verify_oidc(authorization)
-    raise HTTPException(status_code=501, detail="executor agent not implemented yet (Track B)")
+
+    run_id = body.get("settlement_run_id")
+    task_id = body.get("task_id")
+    candidate_claims = body.get("candidate_claims")
+    duplicate_groups = body.get("duplicate_groups") or []
+    if not run_id or not task_id or candidate_claims is None:
+        raise HTTPException(
+            status_code=400,
+            detail="settlement_run_id, task_id, candidate_claims required",
+        )
+
+    # agent_sessions는 entity_id=settlement_run_id 기준이다 — actor_ref를 쓸 자연스러운
+    # 값이 없다(정산 실행은 특정 수취인 하나에 묶이지 않는다). 그래서
+    # find_prior_session_summary는 부르지 않는다 — 같은 run_id로 다시 호출될 때의
+    # 연속성은 get_or_create_session이 같은 세션 문서를 찾아오는 것만으로 충분하다.
+    session = get_or_create_session(AgentType.EXECUTOR, entity_id=run_id)
+    prior_turns = (
+        "\n".join(f"[{t.role}] {t.content}" for t in session.turns)
+        if session.turns
+        else "(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)"
+    )
+
+    untrusted_block = (
+        f"candidate_claims:\n{candidate_claims}\n\n"
+        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}"
+    )
+    session = append_turn(
+        session,
+        role="INPUT",
+        content=untrusted_block,
+        untrusted=True,
+        doc_refs=[c["claim_id"] for c in candidate_claims if c.get("claim_id")],
+    )
+
+    prompt = (
+        f"settlement_run_id: {run_id!r}\n"
+        f"task_id: {task_id!r}\n\n"
+        f"이전 턴 기록:\n{prior_turns}\n\n"
+        "<untrusted_receipt_text>\n"
+        f"{untrusted_block}\n"
+        "</untrusted_receipt_text>\n\n"
+        "위 후보 claim들을 검토해 이상징후를 서술한 뒤, submit_settlement_analysis 툴을 "
+        f"호출해 제출하세요. settlement_run_id에는 {run_id!r}을, task_id에는 {task_id!r}을 "
+        "그대로 넘기세요."
+    )
+    final_text = await _run_once(executor_agent, session_id=task_id, prompt=prompt)
+    if final_text:
+        append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
+    return {"status": "ok"}

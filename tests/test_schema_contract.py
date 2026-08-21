@@ -65,7 +65,8 @@ def test_executor_draft_call_validates_against_agent_draft_schema(monkeypatch):
         submit_settlement_analysis,
         settlement_run_id="run_1",
         task_id="task_1",
-        analysis="매칭 실패 없음",
+        anomalies=[],
+        summary_text="매칭 실패 없음",
     )
     AgentDraft.model_validate(
         {

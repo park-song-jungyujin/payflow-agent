@@ -48,12 +48,13 @@ def test_invalid_bearer_token_rejected(client, monkeypatch):
     assert resp.status_code == 401
 
 
-def test_claimant_route_is_not_implemented(client, monkeypatch):
+def test_claimant_route_requires_receipt_id(client, monkeypatch):
+    """501 스텁이 사라졌다 — 배선 전체는 tests/test_claimant_pipeline.py가 덮는다."""
     monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
     resp = client.post(
         "/agents/claimant/review", json={}, headers={"Authorization": "Bearer x"}
     )
-    assert resp.status_code == 501
+    assert resp.status_code == 400
 
 
 def test_executor_analyze_missing_fields_rejected(client, monkeypatch):

@@ -40,9 +40,22 @@ def test_claimant_draft_call_validates_against_agent_draft_schema(monkeypatch):
         submit_receipt_review,
         receipt_id="rct_1",
         task_id="task_1",
-        classification="업무용",
+        needs_requery=False,
+        is_business=True,
         requery_message="",
+        reason="금액·날짜 모두 읽혔다",
     )
+    # §9 payload 계약 — 백엔드 parse_claimant_payload(api/src/ingest/drafts.py)가
+    # needs_requery를 bool로 요구한다. enum만 대조하던 이 스위트가 스캐폴딩의
+    # {classification, requery_message} 불일치를 못 잡았다. 여기서 막는다.
+    assert set(call["payload"]) == {
+        "needs_requery",
+        "is_business",
+        "requery_message",
+        "reason",
+    }
+    assert isinstance(call["payload"]["needs_requery"], bool)
+    assert isinstance(call["payload"]["is_business"], bool)
     AgentDraft.model_validate(
         {
             "draft_id": f"drf_{call['task_id']}",

@@ -4,7 +4,7 @@
 만든 OIDC 토큰만 통과시킨다. 응답 본문은 의미가 없다: 결과는 agent_drafts에 쓰고
 200만 돌려준다 — api가 draft를 읽어간다.
 
-claimant 라우트는 자리만 잡아둔다(Track A). executor는 이상징후 서술만 구현했다 —
+executor는 이상징후 서술만 구현했다 —
 자연어 → 정산 필터 변환은 별도 배선이 필요해 범위 밖이다(executor/agent.py 참조).
 """
 
@@ -21,6 +21,8 @@ from google.auth.transport import requests as google_requests  # noqa: E402
 from google.genai import types  # noqa: E402
 from google.oauth2 import id_token  # noqa: E402
 
+from claimant.agent import root_agent as claimant_agent  # noqa: E402
+from claimant.receipt_text import ReceiptTextUnavailable, fetch_raw_text  # noqa: E402
 from executor.agent import root_agent as executor_agent  # noqa: E402
 from safety.agent import root_agent as safety_agent  # noqa: E402
 from shared.memory import AgentType, append_turn, get_or_create_session  # noqa: E402
@@ -104,9 +106,70 @@ async def safety_report(body: dict, authorization: str = Header(default="")):
 
 
 @app.post("/agents/claimant/review")
-def claimant_review(body: dict, authorization: str = Header(default="")):
+async def claimant_review(body: dict, authorization: str = Header(default="")):
+    """schema-contract.md §9 — 파싱이 PARSED로 확정한 직후 api가 부른다.
+
+    본문에는 파싱 스냅샷 7필드가 실려 온다(원문은 `raw_text_gcs_uri`로만 온다 —
+    큐 본문에 원문을 실으면 §2가 막아둔 유출 경로가 열린다). executor 라우트와
+    같은 형태이고, 다른 점은 entity_id가 receipt_id라는 것뿐이다.
+    """
     _verify_oidc(authorization)
-    raise HTTPException(status_code=501, detail="claimant agent not implemented yet (Track A)")
+
+    receipt_id = body.get("receipt_id")
+    task_id = body.get("task_id")
+    if not receipt_id or not task_id:
+        raise HTTPException(status_code=400, detail="receipt_id, task_id required")
+
+    # 원문을 못 읽어도 멈추지 않는다 — 구조화 필드만으로도 (a)금액 없음·(b)날짜 없음
+    # 판정은 가능하다. 여기서 500을 내면 Cloud Tasks가 재시도하고, 재시도가 계속
+    # 실패하면 이 영수증은 CLAIMANT draft 없이 남아 재촉 루프가 문안을 못 받는다.
+    raw_text_uri = body.get("raw_text_gcs_uri")
+    try:
+        raw_text = fetch_raw_text(raw_text_uri) if raw_text_uri else ""
+    except ReceiptTextUnavailable as e:
+        raw_text = f"(원문을 읽지 못했습니다: {e})"
+
+    session = get_or_create_session(AgentType.CLAIMANT, entity_id=receipt_id)
+    prior_turns = (
+        "\n".join(f"[{t.role}] {t.content}" for t in session.turns)
+        if session.turns
+        else "(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)"
+    )
+
+    snapshot = {
+        key: body.get(key)
+        for key in (
+            "merchant_name",
+            "transaction_date",
+            "parsed_amount_minor",
+            "currency",
+            "account_category_code",
+            "parse_confidence",
+        )
+    }
+    untrusted_block = f"파싱 결과:\n{snapshot}\n\n영수증 원문:\n{raw_text}"
+    session = append_turn(
+        session,
+        role="INPUT",
+        content=untrusted_block,
+        untrusted=True,
+        doc_refs=[receipt_id],
+    )
+
+    prompt = (
+        f"receipt_id: {receipt_id!r}\n"
+        f"task_id: {task_id!r}\n\n"
+        f"이전 턴 기록:\n{prior_turns}\n\n"
+        "<untrusted_receipt_text>\n"
+        f"{untrusted_block}\n"
+        "</untrusted_receipt_text>\n\n"
+        "위 파싱 결과를 검토한 뒤, submit_receipt_review 툴을 호출해 판정을 제출하세요. "
+        f"receipt_id에는 {receipt_id!r}을, task_id에는 {task_id!r}을 그대로 넘기세요."
+    )
+    final_text = await _run_once(claimant_agent, session_id=task_id, prompt=prompt)
+    if final_text:
+        append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
+    return {"status": "ok"}
 
 
 @app.post("/agents/executor/analyze")

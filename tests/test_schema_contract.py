@@ -80,6 +80,8 @@ def test_executor_draft_call_validates_against_agent_draft_schema(monkeypatch):
         task_id="task_1",
         anomalies=[],
         summary_text="매칭 실패 없음",
+        anomalies_en=[],
+        summary_text_en="No matching failures",
     )
     AgentDraft.model_validate(
         {

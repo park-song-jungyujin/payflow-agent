@@ -182,6 +182,7 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     task_id = body.get("task_id")
     candidate_claims = body.get("candidate_claims")
     duplicate_groups = body.get("duplicate_groups") or []
+    exact_duplicate_groups = body.get("exact_duplicate_groups") or []
     if not run_id or not task_id or candidate_claims is None:
         raise HTTPException(
             status_code=400,
@@ -201,7 +202,9 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
 
     untrusted_block = (
         f"candidate_claims:\n{candidate_claims}\n\n"
-        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}"
+        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}\n\n"
+        f"exact_duplicate_groups(영수증 고유번호가 완전일치해 코드가 이미 확신하는 "
+        f"중복 클러스터):\n{exact_duplicate_groups}"
     )
     session = append_turn(
         session,

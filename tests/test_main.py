@@ -221,6 +221,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "task_id": "task_1",
             "candidate_claims": [{"claim_id": "clm_1"}, {"claim_id": "clm_2"}],
             "duplicate_groups": [{"claim_ids": ["clm_1", "clm_2"]}],
+            "exact_duplicate_groups": [
+                {"claim_ids": ["clm_1", "clm_2"], "receipt_serial_number": "A1234"}
+            ],
         },
         headers={"Authorization": "Bearer x"},
     )
@@ -228,6 +231,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
     assert sessions_fetched == [(AgentType.EXECUTOR, "run_1")]
+    # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
+    # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
+    assert "A1234" in turns_appended[0]["content"]
     assert drafts_written == [
         {
             "agent": "EXECUTOR",

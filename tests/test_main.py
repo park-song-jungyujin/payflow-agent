@@ -207,6 +207,8 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             task_id=session_id,
             anomalies=["중복 의심 1건"],
             summary_text="중복 의심 1건, 나머지는 이상 없음",
+            anomalies_en=["1 suspected duplicate"],
+            summary_text_en="1 suspected duplicate, no issues otherwise",
         )
         return "중복 의심 1건, 나머지는 이상 없음"
 
@@ -235,6 +237,8 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "payload": {
                 "anomalies": ["중복 의심 1건"],
                 "summary_text": "중복 의심 1건, 나머지는 이상 없음",
+                "anomalies_en": ["1 suspected duplicate"],
+                "summary_text_en": "1 suspected duplicate, no issues otherwise",
             },
         }
     ]

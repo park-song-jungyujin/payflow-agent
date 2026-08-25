@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime
 
 from google.adk.tools.tool_context import ToolContext
 
-from shared.api_client import write_agent_draft
+from shared.api_client import reject_claim_items, write_agent_draft
 
 
 def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
@@ -52,6 +52,53 @@ def check_future_dated_claims(candidate_claims: list[dict]) -> dict:
     """
     today = datetime.now(UTC).date()
     return {"today": today.isoformat(), "future_dated": _future_dated(candidate_claims, today)}
+
+
+def flag_personal_use_items(
+    settlement_run_id: str,
+    task_id: str,
+    rejections: list[dict],
+    tool_context: ToolContext,
+) -> dict:
+    """개인적 사용이 의심되는 물품을 청구 반려한다 — 그 물품 가격을 정산 금액에서
+    제외한다. 이상징후 서술이 끝난 뒤, submit_settlement_analysis를 부르기 전에
+    호출한다(반려 내역을 요약에 포함하려면 먼저 반려부터 끝나야 한다).
+
+    의심 물품을 하나도 못 찾았으면 이 툴을 아예 호출하지 않는다 — 빈 리스트를
+    넘기지 않는다. 물품명만으로 업무 관련성이 뚜렷이 없어 보이는 경우로 한정한다
+    (개인 미용·개인 생필품·개인 오락 등) — account_category_code와 상충되는
+    물품 하나가 섞여 있는 경우가 전형적이다. 클레임 전체가 아니라 그 물품 한 줄만
+    반려한다. 사람이 나중에 web에서 언제든 되돌릴 수 있는 상태를 만들 뿐이지만,
+    근거 없이 반려하지는 않는다.
+
+    rejections: 반려할 물품 목록. 이번 호출 한 번에 전부 담는다(claim마다
+        따로따로 부르지 않는다 — 세션당 툴 호출 횟수 제한에 걸릴 수 있다). 각
+        항목은 다음 세 키를 갖는 dict다.
+        - claim_id: 그 물품이 속한 claim의 claim_id.
+        - item_index: candidate_claims에서 그 claim의 items 배열 안 위치(0부터
+          시작).
+        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 한국어 사유. "개인
+          사용으로 추정" 같은 모호한 문구 대신 물품명·맥락을 근거로 구체적으로
+          쓴다(예: "샴푸는 사무용품 영수증에 섞인 개인 생필품으로 보입니다").
+
+    반환: {"status": "ok", "results": [...]} — results의 각 항목은
+        {"claim_id", "item_index", "status", ...}. 일부만 실패해도(잘못된
+        item_index 등) 나머지는 정상 반영된다 — status가 "error"인 항목은
+        summary_text에 반려 내역으로 넣지 않는다.
+        api 호출 자체가 실패해도(네트워크·상태 불일치 등) 예외를 던지지 않고
+        {"status": "error", ...}를 돌려준다 — 반려가 실패해도 이상징후 분석
+        자체(submit_settlement_analysis)는 계속 진행해야 하기 때문이다.
+    """
+    if not rejections:
+        return {"status": "error", "detail": "rejections must not be empty"}
+
+    try:
+        result = reject_claim_items(
+            settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
+        )
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+    return {"status": "ok", "results": result.get("results", [])}
 
 
 def submit_settlement_analysis(

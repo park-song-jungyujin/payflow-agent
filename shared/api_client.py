@@ -59,3 +59,16 @@ def record_tool_call_audit(
         "/agents/audit",
         {"agent": agent, "action": action, "run_id": run_id, "reason": reason},
     )
+
+
+def reject_claim_items(
+    *, settlement_run_id: str, task_id: str, rejections: list[dict]
+) -> dict:
+    """청구 반려 자동화 — api/src/settlements/routes.py의
+    POST /agents/executor/reject-items를 부른다. 사람이 web 체크박스로 직접 하는
+    것과 최종 효과(_apply_item_exclusion)는 같다 — 금액 재계산은 api가 한다,
+    여기서는 "어떤 물품을 반려할지"만 실어 보낸다(절대 규칙 3)."""
+    return _post(
+        "/agents/executor/reject-items",
+        {"settlement_run_id": settlement_run_id, "task_id": task_id, "rejections": rejections},
+    )

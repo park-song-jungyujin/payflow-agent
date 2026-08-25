@@ -15,6 +15,7 @@ CLAUDE.md: 파싱 결과 검토, 업무용·개인용 분류, 재요청 문안 �
 import os
 
 from google.adk.agents import LlmAgent
+from google.genai import types
 
 from shared.callbacks import make_before_tool_callback
 from shared.memory_tools import fetch_full_session_history
@@ -79,4 +80,7 @@ root_agent = LlmAgent(
     instruction=INSTRUCTION,
     tools=[submit_receipt_review, fetch_full_session_history],
     before_tool_callback=make_before_tool_callback("CLAIMANT"),
+    # executor와 동일한 이유(judgment 일관성) — reason 서술이 같은 입력에도
+    # 흔들리지 않도록 temperature를 낮춘다. 0으로 두진 않는다.
+    generate_content_config=types.GenerateContentConfig(temperature=0.2),
 )

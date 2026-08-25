@@ -9,6 +9,7 @@ api/src/guards/의 코드가 독립적으로 한다. 이 에이전트 출력이 
 import os
 
 from google.adk.agents import LlmAgent
+from google.genai import types
 
 from shared.callbacks import make_before_tool_callback
 from .tools import submit_risk_report
@@ -34,4 +35,7 @@ root_agent = LlmAgent(
     instruction=INSTRUCTION,
     tools=[submit_risk_report],
     before_tool_callback=make_before_tool_callback("SAFETY"),
+    # claimant·executor와 동일한 이유 — 리스크 리포트 서술이 같은 스냅샷에도
+    # 흔들리지 않도록 temperature를 낮춘다. 0으로 두진 않는다.
+    generate_content_config=types.GenerateContentConfig(temperature=0.2),
 )

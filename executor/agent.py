@@ -16,6 +16,7 @@ Gemma로 번역해 채운다 — claimant_agent의 requery_message와 같은 방
 import os
 
 from google.adk.agents import LlmAgent
+from google.genai import types
 
 from shared.callbacks import make_before_tool_callback
 from shared.memory_tools import fetch_full_session_history
@@ -78,4 +79,8 @@ root_agent = LlmAgent(
     instruction=INSTRUCTION,
     tools=[check_future_dated_claims, submit_settlement_analysis, fetch_full_session_history],
     before_tool_callback=make_before_tool_callback("EXECUTOR"),
+    # 4번 유형("애매한 패턴")은 LLM 자유판단이라 같은 입력에도 서술이 흔들릴 수
+    # 있다. temperature를 낮춰 일관성을 높이되, 패턴 탐지 여지가 아예 사라지지
+    # 않도록 0으로는 두지 않는다.
+    generate_content_config=types.GenerateContentConfig(temperature=0.2),
 )

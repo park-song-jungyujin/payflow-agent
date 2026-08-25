@@ -8,6 +8,8 @@ executor는 이상징후 서술만 구현했다 —
 자연어 → 정산 필터 변환은 별도 배선이 필요해 범위 밖이다(executor/agent.py 참조).
 """
 
+import asyncio
+import json
 import os
 
 from dotenv import load_dotenv
@@ -94,17 +96,26 @@ async def _run_once(agent, session_id: str, prompt: str, state: dict | None = No
     return final_text
 
 
-def _render_prior_turns(turns: list[Turn], *, empty_message: str) -> str:
+def _render_prior_turns(
+    turns: list[Turn], *, empty_message: str, include_raw_input: bool = True
+) -> str:
     """tiered-memory-review.html §3·§8 Phase 1 — 과거 턴을 프롬프트에 재주입할 때
     t.untrusted가 true인 턴은 이번 턴과 동일하게 <untrusted_receipt_text>로
     개별 래핑한다. 그러지 않으면 재시도로 이어받은 세션에서 과거 영수증 원문(인젝션
     문구 포함 가능)이 태그 없이 "이전 턴 기록"으로 재유입돼 인젝션 방어가
-    최초 호출에서만 작동하는 구멍이 생긴다."""
+    최초 호출에서만 작동하는 구멍이 생긴다.
+
+    include_raw_input=False면 과거 INPUT 턴의 원문(untrusted 블록)은 생략하고
+    자리 표시자만 남긴다 — 같은 entity_id로 반복 호출될수록 과거 원문이 누적
+    재주입돼 프롬프트가 선형으로 커지는 것을 막는다. 판단 근거로 필요한 건
+    이전에 뭐라고 서술했는가(OUTPUT)이지, 그때 받은 원본 입력이 아니다."""
     if not turns:
         return empty_message
     rendered = []
     for t in turns:
-        if t.untrusted:
+        if t.role == "INPUT" and not include_raw_input:
+            rendered.append("[INPUT] (이전 제출된 원문 생략 — 이번 호출의 입력으로 대체됨)")
+        elif t.untrusted:
             rendered.append(
                 f"[{t.role}] <untrusted_receipt_text>\n{t.content}\n</untrusted_receipt_text>"
             )
@@ -163,19 +174,33 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
 
     org_id = body.get("org_id", "")
     recipient_id = body.get("recipient_id")
-    session = get_or_create_session(
-        AgentType.CLAIMANT, entity_id=receipt_id, actor_ref=recipient_id, org_id=org_id
+    # get_or_create_session·find_prior_session_summary·find_similar_sessions·
+    # append_turn·close_session은 전부 동기 Firestore/임베딩 호출이다. async
+    # 라우트 안에서 그대로 부르면 이벤트 루프를 블로킹해 같은 워커의 다른 요청까지
+    # 멈춘다 — asyncio.to_thread로 스레드풀에 위임해 이벤트 루프를 비워둔다.
+    session = await asyncio.to_thread(
+        get_or_create_session,
+        AgentType.CLAIMANT,
+        entity_id=receipt_id,
+        actor_ref=recipient_id,
+        org_id=org_id,
     )
     prior_turns = _render_prior_turns(
-        session.turns, empty_message="(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)"
+        session.turns,
+        empty_message="(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)",
+        include_raw_input=False,
     )
     # agent-session-memory.html 결정 3 — "새 세션엔 이전 세션 요약이 들어간다".
     # session.turns가 비어 있을 때(=이 receipt_id로는 첫 호출)만 조회한다 —
     # 재시도로 이어받은 세션에는 이미 자기 자신의 턴 기록이 prior_turns로 들어가므로
     # 중복해서 얹을 필요가 없다.
     prior_summary = (
-        find_prior_session_summary(
-            AgentType.CLAIMANT, actor_ref=recipient_id, exclude_entity_id=receipt_id, org_id=org_id
+        await asyncio.to_thread(
+            find_prior_session_summary,
+            AgentType.CLAIMANT,
+            actor_ref=recipient_id,
+            exclude_entity_id=receipt_id,
+            org_id=org_id,
         )
         if not session.turns
         else None
@@ -199,8 +224,12 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
     session.case_features = features
     query_text = format_case_features(AgentType.CLAIMANT, features)
     similar_summaries = (
-        find_similar_sessions(
-            AgentType.CLAIMANT, org_id=org_id, query_text=query_text, exclude_entity_id=receipt_id
+        await asyncio.to_thread(
+            find_similar_sessions,
+            AgentType.CLAIMANT,
+            org_id=org_id,
+            query_text=query_text,
+            exclude_entity_id=receipt_id,
         )
         if not session.turns
         else []
@@ -212,8 +241,13 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         if similar_summaries
         else ""
     )
-    untrusted_block = f"파싱 결과:\n{snapshot}\n\n영수증 원문:\n{raw_text}"
-    session = append_turn(
+    # executor와 동일한 이유 — dict repr 대신 구분자 없는 JSON으로 직렬화한다.
+    untrusted_block = (
+        f"파싱 결과:\n{json.dumps(snapshot, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        f"영수증 원문:\n{raw_text}"
+    )
+    session = await asyncio.to_thread(
+        append_turn,
         session,
         role="INPUT",
         content=untrusted_block,
@@ -238,8 +272,10 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         claimant_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
     )
     if final_text:
-        append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
-    close_session(session)
+        await asyncio.to_thread(
+            append_turn, session, role="OUTPUT", content=final_text, untrusted=False
+        )
+    await asyncio.to_thread(close_session, session)
     return {"status": "ok"}
 
 
@@ -265,9 +301,15 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     # find_prior_session_summary는 부르지 않는다 — 같은 run_id로 다시 호출될 때의
     # 연속성은 get_or_create_session이 같은 세션 문서를 찾아오는 것만으로 충분하다.
     org_id = body.get("org_id", "")
-    session = get_or_create_session(AgentType.EXECUTOR, entity_id=run_id, org_id=org_id)
+    # claimant_review와 같은 이유 — 동기 Firestore 호출을 스레드풀로 위임해
+    # 이벤트 루프를 블로킹하지 않는다.
+    session = await asyncio.to_thread(
+        get_or_create_session, AgentType.EXECUTOR, entity_id=run_id, org_id=org_id
+    )
     prior_turns = _render_prior_turns(
-        session.turns, empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)"
+        session.turns,
+        empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)",
+        include_raw_input=False,
     )
 
     features = extract_executor_features(
@@ -278,8 +320,12 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     session.case_features = features
     query_text = format_case_features(AgentType.EXECUTOR, features)
     similar_summaries = (
-        find_similar_sessions(
-            AgentType.EXECUTOR, org_id=org_id, query_text=query_text, exclude_entity_id=run_id
+        await asyncio.to_thread(
+            find_similar_sessions,
+            AgentType.EXECUTOR,
+            org_id=org_id,
+            query_text=query_text,
+            exclude_entity_id=run_id,
         )
         if not session.turns
         else []
@@ -291,13 +337,19 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         if similar_summaries
         else ""
     )
+    # 파이썬 dict repr(f"{candidate_claims}") 대신 구분자 없는 JSON으로 직렬화한다 —
+    # 값은 동일하되 repr의 불필요한 공백·따옴표 스타일 오버헤드가 없어 토큰이 준다.
+    def _dumps(v):
+        return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
     untrusted_block = (
-        f"candidate_claims:\n{candidate_claims}\n\n"
-        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}\n\n"
+        f"candidate_claims:\n{_dumps(candidate_claims)}\n\n"
+        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{_dumps(duplicate_groups)}\n\n"
         f"exact_duplicate_groups(영수증 고유번호가 완전일치해 코드가 이미 확신하는 "
-        f"중복 클러스터):\n{exact_duplicate_groups}"
+        f"중복 클러스터):\n{_dumps(exact_duplicate_groups)}"
     )
-    session = append_turn(
+    session = await asyncio.to_thread(
+        append_turn,
         session,
         role="INPUT",
         content=untrusted_block,
@@ -322,6 +374,8 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         executor_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
     )
     if final_text:
-        append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
-    close_session(session)
+        await asyncio.to_thread(
+            append_turn, session, role="OUTPUT", content=final_text, untrusted=False
+        )
+    await asyncio.to_thread(close_session, session)
     return {"status": "ok"}

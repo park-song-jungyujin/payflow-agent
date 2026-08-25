@@ -221,7 +221,11 @@ def append_turn(
 ) -> AgentSession:
     """세션에 턴을 추가하고 즉시 Firestore에 반영한다. content는 <untrusted_*> 같은
     래핑을 벗기지 않고 원문 그대로 저장한다 — 압축·요약은 이 함수가 아니라
-    close_session이 닫힌 세션에 한해 코드로 만든다."""
+    close_session이 닫힌 세션에 한해 코드로 만든다.
+
+    turns는 ArrayUnion으로 append한다 — 전체 문서를 set(merge=True)하면
+    Firestore가 list 필드는 통째로 교체해버려, 동시에 두 호출이 append_turn을
+    부르면 먼저 쓴 턴이 사라진다."""
     turn = Turn(
         turn_id=str(uuid.uuid4()),
         ts=datetime.now(timezone.utc),
@@ -232,8 +236,10 @@ def append_turn(
     )
     session.turns.append(turn)
     session.updated_at = turn.ts
+    doc_data = session.model_dump(mode="json", exclude={"turns"})
+    doc_data["turns"] = firestore.ArrayUnion([turn.model_dump(mode="json")])
     get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(
-        session.model_dump(mode="json"), merge=True
+        doc_data, merge=True
     )
     return session
 

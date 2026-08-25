@@ -2,6 +2,7 @@
 tests/ingest/test_store.py(backend)와 같은 fake Firestore 전략을 쓴다."""
 
 import pytest
+from google.cloud import firestore
 
 from shared import memory
 
@@ -23,10 +24,15 @@ class FakeDocRef:
         return FakeSnapshot(self._store.get(self.id))
 
     def set(self, data, merge=False):
+        resolved = dict(data)
+        for field, value in data.items():
+            if isinstance(value, firestore.ArrayUnion):
+                existing = self._store.get(self.id, {}).get(field, []) if merge else []
+                resolved[field] = existing + [v for v in value.values if v not in existing]
         if merge and self.id in self._store:
-            self._store[self.id] = {**self._store[self.id], **data}
+            self._store[self.id] = {**self._store[self.id], **resolved}
         else:
-            self._store[self.id] = data
+            self._store[self.id] = resolved
 
 
 class FakeQuery:

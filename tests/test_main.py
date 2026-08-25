@@ -258,12 +258,21 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     monkeypatch.setattr(main, "get_or_create_session", fake_get_or_create_session)
     monkeypatch.setattr(main, "append_turn", fake_append_turn)
 
+    prompts = []
+    similar_calls = []
+    monkeypatch.setattr(
+        main,
+        "find_similar_sessions",
+        lambda *a, **kw: similar_calls.append((a, kw)) or ["과거 유사 사례: 3턴, 상태 CLOSED"],
+    )
+
     class _FakeToolContext:
         state = {}
 
     async def fake_run_once(agent, session_id, prompt):
         """실제 LlmAgent/Runner/Gemini 대신, 에이전트가 이상징후를 서술하고
         정해진 프로토콜대로 툴을 한 번 호출했다고 가정한 결과를 재현한다."""
+        prompts.append(prompt)
         before_tool_callback = make_before_tool_callback("EXECUTOR")
         gate_result = before_tool_callback(
             tool=type("T", (), {"name": "submit_settlement_analysis"})(),
@@ -300,6 +309,8 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
     assert sessions_fetched == [(AgentType.EXECUTOR, "run_1")]
+    assert "과거 유사 사례: 3턴, 상태 CLOSED" in prompts[0]
+    assert "참고용" in prompts[0]
     # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
     # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
     assert "A1234" in turns_appended[0]["content"]

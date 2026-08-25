@@ -77,6 +77,12 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
         main, "append_turn", lambda session, **kw: turns_appended.append(kw) or session
     )
     monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
+    similar_calls = []
+    monkeypatch.setattr(
+        main,
+        "find_similar_sessions",
+        lambda *a, **kw: similar_calls.append((a, kw)) or ["과거 유사 사례: 3턴, 상태 CLOSED"],
+    )
 
     prompts = []
 
@@ -141,6 +147,8 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     # 원문은 비신뢰 블록 안에서만 프롬프트에 들어간다.
     assert "<untrusted_receipt_text>" in prompts[0]
     assert "합계 45,000원" in prompts[0]
+    assert "과거 유사 사례: 3턴, 상태 CLOSED" in prompts[0]
+    assert "참고용" in prompts[0]
 
 
 def test_unreadable_raw_text_does_not_block_the_review(client, oidc_ok, monkeypatch):

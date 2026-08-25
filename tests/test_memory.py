@@ -192,6 +192,23 @@ def test_close_session_summary_without_doc_refs_omits_them(fake):
     assert "1턴" in closed.summary
 
 
+def test_close_session_does_not_clobber_turns_appended_after_snapshot(fake):
+    """close_session이 부르기 전(in-memory 스냅샷 로드 이후)에 Firestore에
+    append_turn으로 더 쌓인 턴이 있어도, close_session이 그걸 지우면 안 된다."""
+    session = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_1")
+    memory.append_turn(session, role="INPUT", content="첫 턴")
+
+    # 동시 호출을 흉내낸다 — Firestore엔 이미 두 번째 턴이 반영됐지만, 이
+    # in-memory session 객체는 그걸 모른다(재로드 안 함).
+    concurrent = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_1")
+    memory.append_turn(concurrent, role="OUTPUT", content="동시 두번째 턴")
+
+    memory.close_session(session)
+
+    persisted = fake.data["agent_sessions__unknown"]["EXECUTOR__run_1"]
+    assert len(persisted["turns"]) == 2
+
+
 def test_close_session_is_idempotent(fake, monkeypatch):
     """이미 CLOSED인 세션을 다시 닫아도 요약을 재생성하지 않는다."""
     session = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_1")

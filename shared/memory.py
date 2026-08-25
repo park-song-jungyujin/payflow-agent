@@ -269,11 +269,16 @@ def close_session(session: AgentSession) -> AgentSession:
     session.summary = ", ".join(summary_parts)
     session.status = "CLOSED"
     session.updated_at = datetime.now(timezone.utc)
-    data = session.model_dump(mode="json")
+    # turns는 여기서 다시 쓰지 않는다 — append_turn이 ArrayUnion으로 이미 반영했고,
+    # 이 함수가 non-merge set으로 전체를 덮어쓰면 이 in-memory 스냅샷 이후
+    # 동시에 append된 턴이 사라진다.
+    data = session.model_dump(mode="json", exclude={"turns"})
     embedding = _embed_text(session.summary)
     if embedding is not None:
         data["summary_embedding"] = Vector(embedding)
-    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(data)
+    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(
+        data, merge=True
+    )
     return session
 
 

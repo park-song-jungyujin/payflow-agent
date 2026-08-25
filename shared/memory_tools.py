@@ -8,14 +8,16 @@
 from .memory import fetch_full_session
 
 
-def fetch_full_session_history(session_id: str) -> dict:
+def fetch_full_session_history(session_id: str, org_id: str) -> dict:
     """과거 세션(session_id)의 턴 전체를 원문 그대로 불러온다. 프롬프트에 이미 얹힌
     요약만으로 판단이 서지 않을 때만 호출한다 — 예: "이전 세션에서 정확히 뭐라고
     답했는지"가 필요한 경우.
 
     session_id: 프롬프트의 "이전 세션 요약"과 함께 주어지는 과거 세션의 doc ID.
+    org_id: 프롬프트에 함께 주어지는 이 조직의 org_id. 세션이 org별로 파티셔닝돼
+    있어 이 값 없이는 세션을 찾을 수 없다.
     """
-    session = fetch_full_session(session_id)
+    session = fetch_full_session(session_id, org_id)
     if session is None:
         return {"status": "error", "detail": "session not found"}
     return {

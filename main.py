@@ -27,6 +27,7 @@ from claimant.agent import root_agent as claimant_agent  # noqa: E402
 from claimant.receipt_text import ReceiptTextUnavailable, fetch_raw_text  # noqa: E402
 from executor.agent import root_agent as executor_agent  # noqa: E402
 from safety.agent import root_agent as safety_agent  # noqa: E402
+from shared.api_client import write_agent_draft  # noqa: E402
 from shared.memory import (  # noqa: E402
     AgentType,
     Turn,
@@ -65,7 +66,9 @@ def health():
     return {"status": "ok"}
 
 
-async def _run_once(agent, session_id: str, prompt: str, state: dict | None = None) -> str:
+async def _run_once(
+    agent, session_id: str, prompt: str, state: dict | None = None
+) -> tuple[str, dict]:
     """세션은 매 요청마다 새로 만든다 — architecture.md: ADK 세션은
     InMemorySessionService, 재시작 후 살아남을 필요가 없다.
 
@@ -77,7 +80,12 @@ async def _run_once(agent, session_id: str, prompt: str, state: dict | None = No
     건너뛰므로, 툴을 부른 뒤 모델이 남긴 마무리 텍스트만 남는다. 안전 확인
     에이전트는 이 반환값을 쓰지 않는다 — 결과가 이미 submit_risk_report 툴로
     api에 써졌기 때문이다. 집행자 에이전트는 agent_sessions에 OUTPUT 턴으로
-    남기려고 이 값을 쓴다."""
+    남기려고 이 값을 쓴다.
+
+    최종 ADK 세션 state도 함께 돌려준다 — 툴이 tool_context.state에 남긴 값
+    (예: executor_submission_status)을 라우트가 확인해야, LLM이 제출 툴을 아예
+    안 부르거나 before_tool_callback에 거부돼도 200을 그냥 돌려주는 조용한
+    실패를 막을 수 있다(executor_analyze 참조)."""
     session_service = InMemorySessionService()
     await session_service.create_session(
         app_name=APP_NAME, user_id="system", session_id=session_id, state=state or {}
@@ -93,7 +101,11 @@ async def _run_once(agent, session_id: str, prompt: str, state: dict | None = No
             for part in event.content.parts:
                 if getattr(part, "text", None):
                     final_text = part.text
-    return final_text
+
+    final_session = await session_service.get_session(
+        app_name=APP_NAME, user_id="system", session_id=session_id
+    )
+    return final_text, (final_session.state if final_session else {})
 
 
 def _render_prior_turns(
@@ -143,7 +155,7 @@ async def safety_report(body: dict, authorization: str = Header(default="")):
         "그대로 넘기세요."
     )
     await _run_once(safety_agent, session_id=task_id, prompt=prompt)
-    return {"status": "ok"}
+    return {"status": "ok"}  # 안전 확인은 조언자일 뿐이라 게이트가 이 값에 의존하지 않는다
 
 
 @app.post("/agents/claimant/review")
@@ -268,7 +280,7 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         "위 파싱 결과를 검토한 뒤, submit_receipt_review 툴을 호출해 판정을 제출하세요. "
         f"receipt_id에는 {receipt_id!r}을, task_id에는 {task_id!r}을 그대로 넘기세요."
     )
-    final_text = await _run_once(
+    final_text, _ = await _run_once(
         claimant_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
     )
     if final_text:
@@ -370,7 +382,7 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         f"호출해 제출하세요. settlement_run_id에는 {run_id!r}을, task_id에는 {task_id!r}을 "
         "그대로 넘기세요."
     )
-    final_text = await _run_once(
+    final_text, final_state = await _run_once(
         executor_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
     )
     if final_text:
@@ -378,4 +390,21 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
             append_turn, session, role="OUTPUT", content=final_text, untrusted=False
         )
     await asyncio.to_thread(close_session, session)
+
+    # submit_settlement_analysis가 실제로 write_agent_draft까지 성공했는지 확인한다
+    # (executor/tools.py 참조). LLM이 툴을 아예 안 부르거나, before_tool_callback의
+    # 세션당 호출 횟수 제한에 거부되거나, 툴 안에서 write_agent_draft가 실패해도
+    # 지금까지는 이 라우트가 무조건 200을 반환했다 — Cloud Tasks가 "성공"으로
+    # 판단해 재시도조차 안 하고, PROCESSING placeholder(settlements/routes.py)가
+    # 영원히 안 풀리는 조용한 실패였다. 여기서 명시적으로 FAILED를 기록해 web이
+    # "분석을 시작하지 못했습니다"를 보여주게 한다(_executor_analysis가 이미
+    # status=FAILED를 처리한다 — set_executor_analysis_status와 같은 payload 형태).
+    if final_state.get("executor_submission_status") != "ok":
+        write_agent_draft(
+            agent="EXECUTOR",
+            target_type="SETTLEMENT_RUN",
+            target_id=run_id,
+            task_id=task_id,
+            payload={"status": "FAILED", "reason": "executor agent did not submit an analysis"},
+        )
     return {"status": "ok"}

@@ -112,7 +112,7 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
         turns = []
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
-        return ""
+        return "", {"executor_submission_status": "ok"}
 
     monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
@@ -141,7 +141,7 @@ def test_executor_analyze_passes_org_id_to_session(client, monkeypatch):
         return _FakeSession()
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
-        return ""
+        return "", {"executor_submission_status": "ok"}
 
     monkeypatch.setattr(main, "get_or_create_session", fake_get_or_create_session)
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
@@ -279,7 +279,8 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     )
 
     class _FakeToolContext:
-        state = {}
+        def __init__(self):
+            self.state = {}
 
     async def fake_run_once(agent, session_id, prompt, state=None):
         """실제 LlmAgent/Runner/Gemini 대신, 에이전트가 이상징후를 서술하고
@@ -287,10 +288,11 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
         prompts.append(prompt)
         states.append(state)
         before_tool_callback = make_before_tool_callback("EXECUTOR")
+        tool_context = _FakeToolContext()
         gate_result = before_tool_callback(
             tool=type("T", (), {"name": "submit_settlement_analysis"})(),
             args={},
-            tool_context=_FakeToolContext(),
+            tool_context=tool_context,
         )
         assert gate_result is None  # 게이트 통과
         submit_settlement_analysis(
@@ -298,8 +300,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             task_id=session_id,
             anomalies=["중복 의심 1건"],
             summary_text="중복 의심 1건, 나머지는 이상 없음",
+            tool_context=tool_context,
         )
-        return "중복 의심 1건, 나머지는 이상 없음"
+        return "중복 의심 1건, 나머지는 이상 없음", tool_context.state
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -351,3 +354,49 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert turns_appended[0]["doc_refs"] == ["clm_1", "clm_2"]
     assert turns_appended[1]["untrusted"] is False
     assert turns_appended[1]["content"] == "중복 의심 1건, 나머지는 이상 없음"
+
+
+def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(client, monkeypatch):
+    """PROCESSING이 영원히 안 풀리던 조용한 실패에 대한 회귀 테스트 — LLM이
+    submit_settlement_analysis를 아예 안 부르고 끝나도(before_tool_callback 거부
+    포함) 이 라우트는 예전엔 그냥 200을 반환했다. 이제는 draft가 실제로 안
+    써졌으면 명시적으로 FAILED를 기록한다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+
+    class _FakeSession:
+        turns = []
+
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
+    monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+    monkeypatch.setattr(main, "find_similar_sessions", lambda *a, **kw: [])
+
+    async def fake_run_once(agent, session_id, prompt, state=None):
+        # 모델이 아무 툴도 안 부르고 텍스트만 남기고 끝낸 경우를 재현한다.
+        return "이상징후가 없어 보입니다만 제출은 잊었습니다", {}
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+
+    failed_drafts = []
+    monkeypatch.setattr(
+        main, "write_agent_draft", lambda **kw: failed_drafts.append(kw) or {"draft_id": "x"}
+    )
+
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert resp.status_code == 200
+    assert failed_drafts == [
+        {
+            "agent": "EXECUTOR",
+            "target_type": "SETTLEMENT_RUN",
+            "target_id": "run_1",
+            "task_id": "task_1",
+            "payload": {
+                "status": "FAILED",
+                "reason": "executor agent did not submit an analysis",
+            },
+        }
+    ]

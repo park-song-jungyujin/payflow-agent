@@ -5,6 +5,11 @@ from datetime import date, datetime
 from executor import tools
 
 
+class _FakeToolContext:
+    def __init__(self):
+        self.state = {}
+
+
 # --- check_future_dated_claims — 날짜 산술은 LLM이 아니라 이 툴이 결정한다 ---
 
 
@@ -54,16 +59,20 @@ def test_check_future_dated_claims_uses_server_clock(monkeypatch):
 def test_empty_summary_rejected_without_calling_api(monkeypatch):
     calls = []
     monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})
+    tool_context = _FakeToolContext()
 
     result = tools.submit_settlement_analysis(
         settlement_run_id="run_1",
         task_id="task_1",
         anomalies=[],
         summary_text="   ",
+        tool_context=tool_context,
     )
 
     assert result == {"status": "error", "detail": "summary_text must not be empty"}
     assert calls == []
+    # main.py.executor_analyze가 이 값으로 draft가 실제로 안 써졌음을 판단한다.
+    assert tool_context.state["executor_submission_status"] == "error"
 
 
 def test_empty_anomalies_list_is_valid(monkeypatch):
@@ -73,11 +82,13 @@ def test_empty_anomalies_list_is_valid(monkeypatch):
         tools, "write_agent_draft", lambda **kw: calls.append(kw) or {"draft_id": "drf_task_1"}
     )
 
+    tool_context = _FakeToolContext()
     result = tools.submit_settlement_analysis(
         settlement_run_id="run_1",
         task_id="task_1",
         anomalies=[],
         summary_text="이상 없음",
+        tool_context=tool_context,
     )
 
     assert result == {"status": "ok", "draft_id": "drf_task_1"}
@@ -85,6 +96,7 @@ def test_empty_anomalies_list_is_valid(monkeypatch):
         "anomalies": [],
         "summary_text": "이상 없음",
     }
+    assert tool_context.state["executor_submission_status"] == "ok"
 
 
 def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
@@ -100,6 +112,7 @@ def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
         task_id="task_1",
         anomalies=["같은 가맹점 · 같은 금액 · 3분 간격 청구 2건"],
         summary_text="중복 의심 1건, 나머지는 이상 없음",
+        tool_context=_FakeToolContext(),
     )
 
     assert result == {"status": "ok", "draft_id": "drf_task_1"}

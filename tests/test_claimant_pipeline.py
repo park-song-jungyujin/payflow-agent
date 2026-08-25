@@ -124,7 +124,7 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
             requery_message="총액이 나오게 다시 찍어 보내주세요",
             reason="parsed_amount_minor가 null이다",
         )
-        return "금액이 읽히지 않아 재요청으로 판단했습니다"
+        return "금액이 읽히지 않아 재요청으로 판단했습니다", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -188,7 +188,7 @@ def test_unreadable_raw_text_does_not_block_the_review(client, oidc_ok, monkeypa
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         prompts.append(prompt)
-        return ""
+        return "", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -209,7 +209,7 @@ def test_no_raw_text_uri_is_not_an_error(client, oidc_ok, monkeypatch):
     monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
-        return ""
+        return "", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -244,7 +244,7 @@ def test_new_session_injects_prior_session_summary(client, oidc_ok, monkeypatch)
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         prompts.append(prompt)
-        return ""
+        return "", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -286,7 +286,7 @@ def test_continuing_session_skips_prior_session_summary_lookup(client, oidc_ok, 
     )
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
-        return ""
+        return "", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -327,7 +327,7 @@ def test_continuing_session_skips_similar_sessions_lookup(client, oidc_ok, monke
     )
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
-        return ""
+        return "", {}
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 

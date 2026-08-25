@@ -12,6 +12,8 @@ LLM이 스스로 계산하지 않고 이 툴을 호출해 서버 시계 기준 �
 
 from datetime import UTC, date, datetime
 
+from google.adk.tools.tool_context import ToolContext
+
 from shared.api_client import write_agent_draft
 
 
@@ -57,6 +59,7 @@ def submit_settlement_analysis(
     task_id: str,
     anomalies: list[str],
     summary_text: str,
+    tool_context: ToolContext,
 ) -> dict:
     """분석 결과를 api에 기록한다. 분석이 끝나면 반드시 한 번 호출한다.
 
@@ -67,8 +70,15 @@ def submit_settlement_analysis(
 
     영어 번역(anomalies_en·summary_text_en)은 여기서 안 만든다 — api가 draft를
     받는 시점에 Gemma로 번역해 채운다(api/src/guards/agent_drafts.py).
+
+    tool_context는 ADK가 자동 주입한다(LLM에는 안 보이는 파라미터) — main.py가
+    이 값을 tool_context.state에 남겨 세션 종료 후 확인한다. main.py.executor_analyze는
+    이 함수의 반환값을 볼 수 없다(ADK가 LLM에게 넘길 뿐 라우트로 되돌려주지 않는다) —
+    이 상태 없이는 LLM이 툴을 아예 안 부르거나 before_tool_callback에 거부돼도
+    라우트가 무조건 200을 반환해, PROCESSING이 영원히 안 풀리는 조용한 실패가 된다.
     """
     if not summary_text.strip():
+        tool_context.state["executor_submission_status"] = "error"
         return {"status": "error", "detail": "summary_text must not be empty"}
 
     result = write_agent_draft(
@@ -81,4 +91,5 @@ def submit_settlement_analysis(
             "summary_text": summary_text,
         },
     )
+    tool_context.state["executor_submission_status"] = "ok"
     return {"status": "ok", "draft_id": result.get("draft_id")}

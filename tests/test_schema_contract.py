@@ -72,6 +72,9 @@ def test_claimant_draft_call_validates_against_agent_draft_schema(monkeypatch):
 def test_executor_draft_call_validates_against_agent_draft_schema(monkeypatch):
     import executor.tools as mod
 
+    class _FakeToolContext:
+        state = {}
+
     call = _drafted_payload(
         monkeypatch,
         mod,
@@ -80,6 +83,7 @@ def test_executor_draft_call_validates_against_agent_draft_schema(monkeypatch):
         task_id="task_1",
         anomalies=[],
         summary_text="매칭 실패 없음",
+        tool_context=_FakeToolContext(),
     )
     AgentDraft.model_validate(
         {

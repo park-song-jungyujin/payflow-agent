@@ -56,6 +56,76 @@ def test_check_future_dated_claims_uses_server_clock(monkeypatch):
     assert result == {"today": "2026-08-23", "future_dated": []}
 
 
+# --- flag_personal_use_items — 청구 반려 자동화 ---
+
+
+def test_flag_personal_use_items_rejects_without_calling_api_when_empty(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tools, "reject_claim_items", lambda **kw: calls.append(kw) or {})
+
+    result = tools.flag_personal_use_items(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert result == {"status": "error", "detail": "rejections must not be empty"}
+    assert calls == []
+
+
+def test_flag_personal_use_items_forwards_rejections_to_api(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tools,
+        "reject_claim_items",
+        lambda **kw: calls.append(kw)
+        or {"results": [{"claim_id": "clm_1", "item_index": 0, "status": "ok", "amount_minor": 5500}]},
+    )
+
+    result = tools.flag_personal_use_items(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[{"claim_id": "clm_1", "item_index": 0, "reason": "개인 생필품으로 추정"}],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert calls == [
+        {
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "rejections": [{"claim_id": "clm_1", "item_index": 0, "reason": "개인 생필품으로 추정"}],
+        }
+    ]
+    assert result == {
+        "status": "ok",
+        "results": [{"claim_id": "clm_1", "item_index": 0, "status": "ok", "amount_minor": 5500}],
+    }
+
+
+def test_flag_personal_use_items_never_raises_when_api_call_fails(monkeypatch):
+    """반려가 실패해도(run이 이미 승인됐다거나 네트워크 오류) 예외를 던지지 않는다 —
+    던지면 이 뒤에 이어질 submit_settlement_analysis 호출까지 막혀 이상징후
+    분석 자체가 조용히 안 끝나는 버그(fix/executor-silent-failure)가 재발한다."""
+
+    def boom(**kw):
+        raise RuntimeError("settlement_run status is APPROVED, expected DRAFT")
+
+    monkeypatch.setattr(tools, "reject_claim_items", boom)
+
+    result = tools.flag_personal_use_items(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[{"claim_id": "clm_1", "item_index": 0, "reason": "x"}],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert result == {
+        "status": "error",
+        "detail": "settlement_run status is APPROVED, expected DRAFT",
+    }
+
+
 def test_empty_summary_rejected_without_calling_api(monkeypatch):
     calls = []
     monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})

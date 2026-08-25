@@ -11,12 +11,19 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
+from google import genai
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+from google.cloud.firestore_v1.vector import Vector
 from pydantic import BaseModel
 
 _client: firestore.Client | None = None
-_COLLECTION = "agent_sessions"
+_COLLECTION_PREFIX = "agent_sessions"
+
+
+def _collection_name(org_id: str) -> str:
+    return f"{_COLLECTION_PREFIX}__{org_id}" if org_id else f"{_COLLECTION_PREFIX}__unknown"
 
 
 def get_client() -> firestore.Client:
@@ -29,9 +36,123 @@ def get_client() -> firestore.Client:
     return _client
 
 
+_EMBEDDING_MODEL_ENV = "AGENT_MEMORY_EMBEDDING_MODEL"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-005"
+
+
+def _embed_text(text: str) -> list[float] | None:
+    """summary(코드 생성 텍스트)를 임베딩한다. 실패해도 세션 종료를 막지 않는다 —
+    임베딩은 부가 기능이지 필수 경로가 아니다."""
+    try:
+        client = genai.Client()
+        model = os.environ.get(_EMBEDDING_MODEL_ENV, _DEFAULT_EMBEDDING_MODEL)
+        response = client.models.embed_content(model=model, contents=text)
+        return list(response.embeddings[0].values)
+    except Exception:
+        return None
+
+
 class AgentType(str, Enum):
     CLAIMANT = "CLAIMANT"
     EXECUTOR = "EXECUTOR"
+
+
+CATEGORY_DISPLAY: dict[str, str] = {
+    "PAYMENT_FEE": "지급수수료",
+    "EMPLOYEE_BENEFIT": "복리후생비",
+    "TRAVEL": "여비교통비",
+    "SUPPLIES": "소모품비",
+    "ADVERTISING": "광고선전비",
+    "RENT": "지급임차료",
+    "UNCLASSIFIED": "미분류",
+}
+
+
+def extract_claimant_features(snapshot: dict) -> dict:
+    """영수증 파싱 스냅샷에서 결정론적 사건 특징을 추출한다. 금액 숫자는 절대 포함하지 않는다."""
+    merchant = snapshot.get("merchant_name") or ""
+    cat_code = snapshot.get("account_category_code") or "UNCLASSIFIED"
+    cat_display = CATEGORY_DISPLAY.get(cat_code, cat_code)
+    currency = snapshot.get("currency") or ""
+    anomalies = []
+    if snapshot.get("parsed_amount_minor") is None:
+        anomalies.append("금액 미기재")
+    if not snapshot.get("transaction_date"):
+        anomalies.append("거래일자 미기재")
+    conf = snapshot.get("parse_confidence")
+    if conf is not None and conf < 0.7:
+        anomalies.append("저신뢰도 파싱")
+    if cat_code == "UNCLASSIFIED":
+        anomalies.append("미분류 계정과목")
+    if not anomalies:
+        anomalies.append("정상 파싱")
+    return {
+        "merchant_name": merchant,
+        "category": cat_display,
+        "currency": currency,
+        "anomalies": anomalies,
+    }
+
+
+def extract_executor_features(
+    candidate_claims: list[dict],
+    duplicate_groups: list[dict] | None = None,
+    exact_duplicate_groups: list[dict] | None = None,
+) -> dict:
+    """후보 claim 목록 및 중복 그룹에서 결정론적 사건 특징을 추출한다. 금액 숫자는 절대 포함하지 않는다."""
+    merchants = sorted(
+        {c["merchant_name"] for c in candidate_claims if c.get("merchant_name")}
+    )
+    categories = sorted(
+        {
+            CATEGORY_DISPLAY.get(
+                c.get("account_category_code", ""), c.get("account_category_code", "")
+            )
+            for c in candidate_claims
+            if c.get("account_category_code")
+        }
+    )
+    currencies = sorted({c["currency"] for c in candidate_claims if c.get("currency")})
+    anomalies = []
+    if exact_duplicate_groups:
+        anomalies.append("영수증 고유번호 중복")
+    if duplicate_groups:
+        anomalies.append("중복 청구 의심")
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    if any(c.get("transaction_date") and c["transaction_date"] > today_iso for c in candidate_claims):
+        anomalies.append("미래 거래일")
+    if len(currencies) > 1:
+        anomalies.append("다중 통화 혼재")
+    if not anomalies:
+        anomalies.append("이상 없음")
+    return {
+        "merchants": merchants,
+        "categories": categories,
+        "currencies": currencies,
+        "anomalies": anomalies,
+    }
+
+
+def format_case_features(agent_type: AgentType, features: dict) -> str:
+    """사건 특징을 요약 및 벡터 검색 쿼리에서 공유할 표준 포맷 문자열로 변환한다."""
+    parts = []
+    if agent_type == AgentType.CLAIMANT:
+        if features.get("merchant_name"):
+            parts.append(f"가맹점: {features['merchant_name']}")
+        if features.get("category"):
+            parts.append(f"카테고리: {features['category']}")
+        if features.get("anomalies"):
+            anom_str = ", ".join(features["anomalies"])
+            parts.append(f"이상유형: {anom_str}")
+    elif agent_type == AgentType.EXECUTOR:
+        if features.get("merchants"):
+            parts.append(f"가맹점: {', '.join(features['merchants'])}")
+        if features.get("categories"):
+            parts.append(f"카테고리: {', '.join(features['categories'])}")
+        if features.get("anomalies"):
+            anom_str = ", ".join(features["anomalies"])
+            parts.append(f"이상유형: {anom_str}")
+    return ", ".join(parts)
 
 
 class Turn(BaseModel):
@@ -51,6 +172,7 @@ class AgentSession(BaseModel):
     actor_ref: str | None = None
     status: str = "ACTIVE"  # "ACTIVE" | "CLOSED"
     turns: list[Turn] = []
+    case_features: dict = {}
     summary: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -71,7 +193,7 @@ def get_or_create_session(
     org_id는 신규 세션 생성 시에만 반영한다 — 기존 세션은 조회로 이어받으므로
     재기입할 필요가 없다."""
     doc_id = session_id_for(agent_type, entity_id)
-    doc = get_client().collection(_COLLECTION).document(doc_id).get()
+    doc = get_client().collection(_collection_name(org_id)).document(doc_id).get()
     if doc.exists:
         return AgentSession.model_validate(doc.to_dict())
     now = datetime.now(timezone.utc)
@@ -107,27 +229,37 @@ def append_turn(
     )
     session.turns.append(turn)
     session.updated_at = turn.ts
-    get_client().collection(_COLLECTION).document(session.session_id).set(
-        session.model_dump(mode="json")
+    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(
+        session.model_dump(mode="json"), merge=True
     )
     return session
 
 
 def close_session(session: AgentSession) -> AgentSession:
     """세션을 CLOSED로 전환하고 결정론적 요약을 생성한다. 요약은 LLM이 아니라
-    코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수와
-    관련 문서 ID만 남긴다."""
+    코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수,
+    코드 추출 사건 특징, 관련 문서 ID만 남긴다. 요약 임베딩은 있으면 같이
+    저장하고, 실패해도 세션 종료는 계속 진행한다."""
     doc_refs = sorted({ref for turn in session.turns for ref in turn.doc_refs})
-    session.summary = (
-        f"{len(session.turns)}턴, 관련 문서 {doc_refs}, 상태 CLOSED"
-        if doc_refs
-        else f"{len(session.turns)}턴, 상태 CLOSED"
-    )
+    features_str = ""
+    if session.case_features:
+        features_str = format_case_features(session.agent_type, session.case_features)
+
+    summary_parts = [f"{len(session.turns)}턴"]
+    if features_str:
+        summary_parts.append(features_str)
+    if doc_refs:
+        summary_parts.append(f"관련 문서 {doc_refs}")
+    summary_parts.append("상태 CLOSED")
+
+    session.summary = ", ".join(summary_parts)
     session.status = "CLOSED"
     session.updated_at = datetime.now(timezone.utc)
-    get_client().collection(_COLLECTION).document(session.session_id).set(
-        session.model_dump(mode="json")
-    )
+    data = session.model_dump(mode="json")
+    embedding = _embed_text(session.summary)
+    if embedding is not None:
+        data["summary_embedding"] = Vector(embedding)
+    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(data)
     return session
 
 
@@ -143,7 +275,7 @@ def find_prior_session_summary(
         return None
     docs = (
         get_client()
-        .collection(_COLLECTION)
+        .collection(_collection_name(org_id))
         .where(filter=FieldFilter("agent_type", "==", agent_type.value))
         .where(filter=FieldFilter("org_id", "==", org_id))
         .where(filter=FieldFilter("actor_ref", "==", actor_ref))
@@ -159,8 +291,52 @@ def find_prior_session_summary(
     return None
 
 
-def fetch_full_session(session_id: str) -> AgentSession | None:
+def find_similar_sessions(
+    agent_type: AgentType,
+    org_id: str,
+    query_text: str,
+    exclude_entity_id: str,
+    limit: int = 3,
+) -> list[str]:
+    """agent-session-memory-v2-design.md §3 — actor_ref가 달라도 같은 org 안에서
+    의미상 유사한 과거 종료 세션을 찾는다. `summary`(코드 생성 텍스트)만
+    반환한다 — 턴 원문은 절대 돌려주지 않는다. 임베딩 실패 시 빈 리스트."""
+    embedding = _embed_text(query_text)
+    if embedding is None:
+        return []
+    try:
+        docs = (
+            get_client()
+            .collection(_collection_name(org_id))
+            .where(filter=FieldFilter("agent_type", "==", agent_type.value))
+            .where(filter=FieldFilter("status", "==", "CLOSED"))
+            .find_nearest(
+                vector_field="summary_embedding",
+                query_vector=Vector(embedding),
+                limit=limit + 1,
+                distance_measure=DistanceMeasure.COSINE,
+            )
+            .stream()
+        )
+        results = []
+        for doc in docs:
+            data = doc.to_dict()
+            if data.get("entity_id") == exclude_entity_id:
+                continue
+            if data.get("summary"):
+                results.append(data["summary"])
+            if len(results) == limit:
+                break
+        return results
+    except Exception:
+        return []
+
+
+def fetch_full_session(session_id: str, org_id: str) -> AgentSession | None:
     """과거 세션의 턴 원문 전체를 불러온다. `fetch_full_session_history` 툴이 이
-    함수를 감싼다 — 에이전트가 요약만으로 부족할 때 호출한다."""
-    doc = get_client().collection(_COLLECTION).document(session_id).get()
+    함수를 감싼다 — 에이전트가 요약만으로 부족할 때 호출한다.
+
+    org_id는 컬렉션명을 계산하는 데만 쓴다 — v2부터 세션이 org별로 파티셔닝돼
+    있어 org_id 없이는 어느 컬렉션을 봐야 할지 알 수 없다."""
+    doc = get_client().collection(_collection_name(org_id)).document(session_id).get()
     return AgentSession.model_validate(doc.to_dict()) if doc.exists else None

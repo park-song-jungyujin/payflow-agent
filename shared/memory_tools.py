@@ -5,17 +5,24 @@
 필요할 때만 쓰는 선택 경로다.
 """
 
+from google.adk.tools.tool_context import ToolContext
+
 from .memory import fetch_full_session
 
 
-def fetch_full_session_history(session_id: str) -> dict:
+def fetch_full_session_history(
+    session_id: str, tool_context: ToolContext | None = None
+) -> dict:
     """과거 세션(session_id)의 턴 전체를 원문 그대로 불러온다. 프롬프트에 이미 얹힌
     요약만으로 판단이 서지 않을 때만 호출한다 — 예: "이전 세션에서 정확히 뭐라고
     답했는지"가 필요한 경우.
 
     session_id: 프롬프트의 "이전 세션 요약"과 함께 주어지는 과거 세션의 doc ID.
     """
-    session = fetch_full_session(session_id)
+    org_id = ""
+    if tool_context is not None and hasattr(tool_context, "state") and tool_context.state:
+        org_id = tool_context.state.get("org_id", "")
+    session = fetch_full_session(session_id, org_id)
     if session is None:
         return {"status": "error", "detail": "session not found"}
     return {

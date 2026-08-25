@@ -273,22 +273,29 @@ def find_prior_session_summary(
     조직의 세션 요약이 새어나갈 수 있다 — tiered-memory-review.html §7."""
     if not actor_ref:
         return None
-    docs = (
-        get_client()
-        .collection(_collection_name(org_id))
-        .where(filter=FieldFilter("agent_type", "==", agent_type.value))
-        .where(filter=FieldFilter("org_id", "==", org_id))
-        .where(filter=FieldFilter("actor_ref", "==", actor_ref))
-        .where(filter=FieldFilter("status", "==", "CLOSED"))
-        .order_by("updated_at", direction=firestore.Query.DESCENDING)
-        .limit(5)
-        .stream()
-    )
-    for doc in docs:
-        data = doc.to_dict()
-        if data.get("entity_id") != exclude_entity_id:
-            return data.get("summary")
-    return None
+    try:
+        docs = (
+            get_client()
+            .collection(_collection_name(org_id))
+            .where(filter=FieldFilter("agent_type", "==", agent_type.value))
+            .where(filter=FieldFilter("org_id", "==", org_id))
+            .where(filter=FieldFilter("actor_ref", "==", actor_ref))
+            .where(filter=FieldFilter("status", "==", "CLOSED"))
+            .order_by("updated_at", direction=firestore.Query.DESCENDING)
+            .limit(5)
+            .stream()
+        )
+        for doc in docs:
+            data = doc.to_dict()
+            if data.get("entity_id") != exclude_entity_id:
+                return data.get("summary")
+        return None
+    except Exception:
+        # find_similar_sessions와 같은 폴백 — org별 복합 색인이 아직 없으면
+        # FAILED_PRECONDITION이 나는데(신규 org 온보딩 시 흔함, 런북 §5),
+        # 이 함수 하나 때문에 claimant_review/executor_analyze 엔드포인트
+        # 전체가 500으로 죽으면 안 된다. 이전 세션 요약 없이 계속 진행한다.
+        return None
 
 
 def find_similar_sessions(

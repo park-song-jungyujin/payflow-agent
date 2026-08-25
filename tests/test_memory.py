@@ -248,6 +248,39 @@ def test_find_prior_session_summary_does_not_leak_across_orgs(fake):
     assert result is None
 
 
+def test_find_prior_session_summary_returns_none_when_firestore_query_fails(fake, monkeypatch):
+    """find_prior_session_summary 대상 복합 색인이 아직 없는 org에서 Firestore가
+    FAILED_PRECONDITION을 던져도, find_similar_sessions와 마찬가지로 예외를 삼키고
+    None으로 안전하게 내려가야 한다 — claimant_review/executor_analyze 엔드포인트가
+    이 함수 하나 때문에 500으로 죽으면 안 된다."""
+
+    class BoomQuery:
+        def where(self, filter=None):
+            return self
+
+        def order_by(self, field, direction=None):
+            return self
+
+        def limit(self, n):
+            return self
+
+        def stream(self):
+            raise RuntimeError("FAILED_PRECONDITION: The query requires an index")
+
+    monkeypatch.setattr(memory, "get_client", lambda: type(
+        "C", (), {"collection": lambda self, name: BoomQuery()}
+    )())
+
+    result = memory.find_prior_session_summary(
+        memory.AgentType.EXECUTOR,
+        actor_ref="shared@example.com",
+        exclude_entity_id="run_new",
+        org_id="org_B",
+    )
+
+    assert result is None
+
+
 def test_close_session_stores_summary_embedding(fake, monkeypatch):
     monkeypatch.setattr(memory, "_embed_text", lambda text: [0.1, 0.2, 0.3])
     session = memory.get_or_create_session(

@@ -128,6 +128,113 @@ def test_flag_personal_use_items_never_raises_when_api_call_fails(monkeypatch):
     }
 
 
+# --- flag_duplicate_claims — 이미 송금 완료된 영수증 재청구 자동 반려 ---
+
+
+def test_flag_duplicate_claims_rejects_without_calling_api_when_empty(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tools, "reject_claim_items", lambda **kw: calls.append(kw) or {})
+
+    result = tools.flag_duplicate_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        claim_ids=[],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert result == {"status": "error", "detail": "claim_ids must not be empty"}
+    assert calls == []
+
+
+def test_flag_duplicate_claims_rejects_every_item_in_the_claim(monkeypatch):
+    """물품을 골라 뽑지 않는다 — claim에 딸린 모든 item_index를 반려 대상에 넣는다."""
+    calls = []
+    monkeypatch.setattr(
+        tools,
+        "reject_claim_items",
+        lambda **kw: calls.append(kw)
+        or {
+            "results": [
+                {"claim_id": "clm_1", "item_index": 0, "status": "ok", "amount_minor": 0},
+                {"claim_id": "clm_1", "item_index": 1, "status": "ok", "amount_minor": 0},
+            ]
+        },
+    )
+    tool_context = _FakeToolContext()
+    tool_context.state["candidate_claims"] = [
+        {
+            "claim_id": "clm_1",
+            "items": [{"name": "택시비", "amount_minor": 18500}, {"name": "부가세", "amount_minor": 0}],
+        },
+        {"claim_id": "clm_other", "items": [{"name": "무관 물품", "amount_minor": 1000}]},
+    ]
+
+    result = tools.flag_duplicate_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        claim_ids=["clm_1"],
+        tool_context=tool_context,
+    )
+
+    assert calls == [
+        {
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "rejections": [
+                {
+                    "claim_id": "clm_1",
+                    "item_index": 0,
+                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                },
+                {
+                    "claim_id": "clm_1",
+                    "item_index": 1,
+                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                },
+            ],
+        }
+    ]
+    assert result["status"] == "ok"
+
+
+def test_flag_duplicate_claims_skips_unknown_claim_ids(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tools, "reject_claim_items", lambda **kw: calls.append(kw) or {})
+    tool_context = _FakeToolContext()
+    tool_context.state["candidate_claims"] = [{"claim_id": "clm_1", "items": []}]
+
+    result = tools.flag_duplicate_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        claim_ids=["clm_missing"],
+        tool_context=tool_context,
+    )
+
+    assert result == {"status": "error", "detail": "no items found for the given claim_ids"}
+    assert calls == []
+
+
+def test_flag_duplicate_claims_never_raises_when_api_call_fails(monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("settlement_run status is APPROVED, expected DRAFT")
+
+    monkeypatch.setattr(tools, "reject_claim_items", boom)
+    tool_context = _FakeToolContext()
+    tool_context.state["candidate_claims"] = [{"claim_id": "clm_1", "items": [{"name": "a"}]}]
+
+    result = tools.flag_duplicate_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        claim_ids=["clm_1"],
+        tool_context=tool_context,
+    )
+
+    assert result == {
+        "status": "error",
+        "detail": "settlement_run status is APPROVED, expected DRAFT",
+    }
+
+
 def test_empty_summary_rejected_without_calling_api(monkeypatch):
     calls = []
     monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})

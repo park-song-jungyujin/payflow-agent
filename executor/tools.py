@@ -108,6 +108,67 @@ def flag_personal_use_items(
     return {"status": "ok", "results": result.get("results", [])}
 
 
+def flag_duplicate_claims(
+    settlement_run_id: str,
+    task_id: str,
+    claim_ids: list[str],
+    tool_context: ToolContext,
+) -> dict:
+    """이미 송금 완료된 영수증의 재청구로 확인된 claim을 통째로 반려한다 —
+    flag_personal_use_items와 달리 물품을 골라 뽑지 않고, claim에 딸린 모든
+    물품을 한 번에 반려해 정산 금액을 0으로 만든다(claim 자체가 문제이지
+    특정 물품이 문제가 아니므로). 이상징후 서술이 끝난 뒤,
+    submit_settlement_analysis를 부르기 전에 호출한다.
+
+    claim_ids: exact_duplicate_groups 중 `already_settled_claim_ids`가
+        비어있지 않은 그룹의 `claim_ids`(이번 배치 후보)만 넘긴다 — 영수증
+        고유번호가 과거에 이미 송금 완료된 receipt와 완전일치하는, 가장
+        확실한 신호일 때만 자동 반려한다. 같은 배치 안에서만 중복인 경우
+        (아직 어느 쪽도 송금된 적 없어 어느 게 원본인지 불확실한 경우)는
+        여기 넣지 않는다 — 사람이 이상징후 서술만 보고 직접 판단하게 둔다.
+
+    candidate_claims(tool_context.state)에서 각 claim_id의 items를 찾아
+    전부 반려 대상에 넣는다 — item_index를 LLM이 직접 세지 않는다
+    (check_future_dated_claims와 같은 이유, 재전사 오류 방지).
+
+    반환: flag_personal_use_items와 같은 형태({"status", "results"}).
+        candidate_claims에 없는 claim_id는 조용히 건너뛴다.
+    """
+    if not claim_ids:
+        return {"status": "error", "detail": "claim_ids must not be empty"}
+
+    candidate_claims = tool_context.state.get("candidate_claims") or []
+    claims_by_id = {
+        c["claim_id"]: c for c in candidate_claims if isinstance(c, dict) and c.get("claim_id")
+    }
+
+    rejections = []
+    for claim_id in claim_ids:
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            continue
+        items = claim.get("items") or []
+        for item_index in range(len(items)):
+            rejections.append(
+                {
+                    "claim_id": claim_id,
+                    "item_index": item_index,
+                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                }
+            )
+
+    if not rejections:
+        return {"status": "error", "detail": "no items found for the given claim_ids"}
+
+    try:
+        result = reject_claim_items(
+            settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
+        )
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+    return {"status": "ok", "results": result.get("results", [])}
+
+
 def submit_settlement_analysis(
     settlement_run_id: str,
     task_id: str,

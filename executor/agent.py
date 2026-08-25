@@ -17,6 +17,13 @@ items(영수증 품목 목록, settlements/routes.py가 이상징후 판단용�
 검토해 개인적 사용이 의심되는 물품을 정산 금액에서 제외한다. 실제 제외·금액
 재계산은 api(POST /agents/executor/reject-items → _apply_item_exclusion)가
 한다 — 이 에이전트는 "어떤 물품이 의심스러운가"만 판단한다(절대 규칙 3).
+
+청구 반려 자동화(flag_duplicate_claims) — exact_duplicate_groups 중
+already_settled_claim_ids가 있는(이미 송금 완료된 영수증의 재청구로 확인된)
+claim은 물품 하나가 아니라 claim 전체를 반려한다. flag_personal_use_items와
+같은 api(reject-items)를 claim의 모든 item_index에 대해 호출하는 방식이라
+— 사람이 web 체크박스로 언제든 되돌릴 수 있는 잠정 상태(절대 규칙 3)라는
+성질도 그대로 유지된다.
 """
 
 import os
@@ -26,7 +33,12 @@ from google.genai import types
 
 from shared.callbacks import make_before_tool_callback
 from shared.memory_tools import fetch_full_session_history
-from .tools import check_future_dated_claims, flag_personal_use_items, submit_settlement_analysis
+from .tools import (
+    check_future_dated_claims,
+    flag_duplicate_claims,
+    flag_personal_use_items,
+    submit_settlement_analysis,
+)
 
 INSTRUCTION = """당신은 정산 실행의 매칭 실패와 이상징후를 서술하는 집행자 에이전트입니다.
 
@@ -46,7 +58,9 @@ LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않
    재제출 의심"이 아니라 "이미 송금 완료된 영수증 재청구 의심"으로 더 강하게
    서술하세요. `claim_ids`(이번 배치 후보)만 이상징후 대상입니다 —
    `already_settled_claim_ids`는 과거 claim이라 지금 배치에서 뺄 수 없는
-   참고 정보일 뿐, 그 자체를 이상징후로 서술하지 않습니다.
+   참고 정보일 뿐, 그 자체를 이상징후로 서술하지 않습니다. 이 `claim_ids`는
+   나중에 flag_duplicate_claims로 자동 반려할 대상이기도 합니다(아래
+   "청구 반려" 절 참조).
 2. **중복 청구** — duplicate_groups(코드가 금액·날짜·가맹점명을 결정론적으로
    대조해 이미 확신한 클러스터)에 있는 claim_id들만 중복으로 서술합니다. 이
    목록에 없는 조합을 스스로 중복이라고 판단하지 않습니다. exact_duplicate_groups와
@@ -65,19 +79,27 @@ LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않
 
 위 서술을 종합한 요약 하나(summary_text)를 작성합니다.
 
-**청구 반려(개인적 사용 의심 물품 제외)** — 이상징후 서술이 끝나면, 각 claim의
-items(품목명·금액) 목록을 모두 검토하세요. 물품명만으로 업무 관련성이 뚜렷이
-없어 보이는 항목(개인 미용용품, 개인 생필품, 개인 오락 등)이 있으면
-flag_personal_use_items 툴을 **한 번만** 호출해 그 물품들을 반려하세요 — claim별로
-나눠 여러 번 호출하지 않습니다. account_category_code와 명백히 맞지 않는
-물품 하나가 섞여 있는 경우가 전형적인 신호입니다. 애매하면 반려하지 않습니다 —
-정황이 뚜렷한 경우로 한정합니다. 클레임 전체가 아니라 의심되는 물품 한 줄만
-반려합니다. 의심 물품이 하나도 없으면 이 툴은 호출하지 않습니다.
+**청구 반려 1 — 이미 송금 완료된 영수증 재청구(claim 전체)** — 1번 유형에서
+already_settled_claim_ids가 있는 그룹을 찾았다면, 그 그룹의 `claim_ids`
+(이번 배치 후보)를 모아 flag_duplicate_claims 툴을 **한 번만** 호출해 통째로
+반려하세요 — 물품을 골라 뽑지 않습니다, claim 자체가 문제입니다. 해당 그룹이
+하나도 없으면 이 툴은 호출하지 않습니다.
 
-flag_personal_use_items 호출(있었다면) 이후에 최종 summary_text를 작성합니다.
-반려한 물품이 있으면 summary_text 맨 아래에 "청구 반려 내역" 섹션을 추가해
-반려한 물품마다 한 줄씩 물품명과 사유를 적으세요 — 이 내역이 나중에 청구자에게
-Slack으로 전달됩니다. 반려가 하나도 없었으면 이 섹션 자체를 넣지 않습니다.
+**청구 반려 2 — 개인적 사용 의심 물품 제외** — 위 반려가 끝나면(있었다면),
+각 claim의 items(품목명·금액) 목록을 모두 검토하세요. 물품명만으로 업무
+관련성이 뚜렷이 없어 보이는 항목(개인 미용용품, 개인 생필품, 개인 오락 등)이
+있으면 flag_personal_use_items 툴을 **한 번만** 호출해 그 물품들을 반려하세요
+— claim별로 나눠 여러 번 호출하지 않습니다. flag_duplicate_claims로 이미
+반려한 claim의 물품은 다시 반려 시도하지 않습니다. account_category_code와
+명백히 맞지 않는 물품 하나가 섞여 있는 경우가 전형적인 신호입니다. 애매하면
+반려하지 않습니다 — 정황이 뚜렷한 경우로 한정합니다. 클레임 전체가 아니라
+의심되는 물품 한 줄만 반려합니다. 의심 물품이 하나도 없으면 이 툴은 호출하지
+않습니다.
+
+두 반려(있었다면) 이후에 최종 summary_text를 작성합니다. 반려한 물품/claim이
+있으면 summary_text 맨 아래에 "청구 반려 내역" 섹션을 추가해 반려한 물품마다
+한 줄씩 물품명과 사유를 적으세요 — 이 내역이 나중에 청구자에게 Slack으로
+전달됩니다. 반려가 하나도 없었으면 이 섹션 자체를 넣지 않습니다.
 
 "이전 턴 기록"이 프롬프트에 함께 주어지면, 이번이 같은 정산 실행에 대한 반복
 호출이라는 뜻입니다. 이전에 이미 서술한 내용을 반복하지 말고 이어서 판단하세요.
@@ -93,8 +115,9 @@ Slack으로 전달됩니다. 반려가 하나도 없었으면 이 섹션 자체�
 
 작성이 끝나면 반드시 submit_settlement_analysis 툴을 한 번 호출해 결과를
 기록하세요(청구 반려를 했다면 그 다음 순서). 이 서술은 조언일 뿐이며 배치 확정
-여부는 사람이 결정합니다 — 물품 반려도 사람이 승인하기 전까지 web에서 언제든
-되돌릴 수 있는 잠정 상태일 뿐, claim 전체를 취소하거나 배치를 막지 않습니다."""
+여부는 사람이 결정합니다 — claim 반려·물품 반려 모두 사람이 승인하기 전까지
+web에서 언제든 되돌릴 수 있는 잠정 상태일 뿐, claim을 영구히 취소하거나
+배치를 막지 않습니다."""
 
 root_agent = LlmAgent(
     name="executor_agent",
@@ -103,6 +126,7 @@ root_agent = LlmAgent(
     instruction=INSTRUCTION,
     tools=[
         check_future_dated_claims,
+        flag_duplicate_claims,
         flag_personal_use_items,
         submit_settlement_analysis,
         fetch_full_session_history,

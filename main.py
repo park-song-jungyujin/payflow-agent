@@ -25,7 +25,7 @@ from claimant.agent import root_agent as claimant_agent  # noqa: E402
 from claimant.receipt_text import ReceiptTextUnavailable, fetch_raw_text  # noqa: E402
 from executor.agent import root_agent as executor_agent  # noqa: E402
 from safety.agent import root_agent as safety_agent  # noqa: E402
-from shared.memory import AgentType, append_turn, get_or_create_session  # noqa: E402
+from shared.memory import AgentType, Turn, append_turn, get_or_create_session  # noqa: E402
 
 app = FastAPI()
 _google_request = google_requests.Request()
@@ -83,6 +83,25 @@ async def _run_once(agent, session_id: str, prompt: str) -> str:
     return final_text
 
 
+def _render_prior_turns(turns: list[Turn], *, empty_message: str) -> str:
+    """tiered-memory-review.html §3·§8 Phase 1 — 과거 턴을 프롬프트에 재주입할 때
+    t.untrusted가 true인 턴은 이번 턴과 동일하게 <untrusted_receipt_text>로
+    개별 래핑한다. 그러지 않으면 재시도로 이어받은 세션에서 과거 영수증 원문(인젝션
+    문구 포함 가능)이 태그 없이 "이전 턴 기록"으로 재유입돼 인젝션 방어가
+    최초 호출에서만 작동하는 구멍이 생긴다."""
+    if not turns:
+        return empty_message
+    rendered = []
+    for t in turns:
+        if t.untrusted:
+            rendered.append(
+                f"[{t.role}] <untrusted_receipt_text>\n{t.content}\n</untrusted_receipt_text>"
+            )
+        else:
+            rendered.append(f"[{t.role}] {t.content}")
+    return "\n".join(rendered)
+
+
 @app.post("/agents/safety/report")
 async def safety_report(body: dict, authorization: str = Header(default="")):
     _verify_oidc(authorization)
@@ -129,11 +148,10 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
     except ReceiptTextUnavailable as e:
         raw_text = f"(원문을 읽지 못했습니다: {e})"
 
-    session = get_or_create_session(AgentType.CLAIMANT, entity_id=receipt_id)
-    prior_turns = (
-        "\n".join(f"[{t.role}] {t.content}" for t in session.turns)
-        if session.turns
-        else "(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)"
+    org_id = body.get("org_id", "")
+    session = get_or_create_session(AgentType.CLAIMANT, entity_id=receipt_id, org_id=org_id)
+    prior_turns = _render_prior_turns(
+        session.turns, empty_message="(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)"
     )
 
     snapshot = {
@@ -193,11 +211,10 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     # 값이 없다(정산 실행은 특정 수취인 하나에 묶이지 않는다). 그래서
     # find_prior_session_summary는 부르지 않는다 — 같은 run_id로 다시 호출될 때의
     # 연속성은 get_or_create_session이 같은 세션 문서를 찾아오는 것만으로 충분하다.
-    session = get_or_create_session(AgentType.EXECUTOR, entity_id=run_id)
-    prior_turns = (
-        "\n".join(f"[{t.role}] {t.content}" for t in session.turns)
-        if session.turns
-        else "(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)"
+    org_id = body.get("org_id", "")
+    session = get_or_create_session(AgentType.EXECUTOR, entity_id=run_id, org_id=org_id)
+    prior_turns = _render_prior_turns(
+        session.turns, empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)"
     )
 
     untrusted_block = (

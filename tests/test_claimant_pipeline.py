@@ -28,6 +28,7 @@ def oidc_ok(monkeypatch):
 _BODY = {
     "receipt_id": "rct_1",
     "task_id": "CLAIMANT:rct_1",
+    "org_id": "org_1",
     "merchant_name": "스타벅스 강남점",
     "transaction_date": "2026-08-05",
     "parsed_amount_minor": None,
@@ -66,8 +67,8 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     monkeypatch.setattr(
         main,
         "get_or_create_session",
-        lambda agent_type, entity_id, actor_ref=None: sessions_fetched.append(
-            (agent_type, entity_id)
+        lambda agent_type, entity_id, actor_ref=None, org_id="": sessions_fetched.append(
+            (agent_type, entity_id, org_id)
         )
         or _FakeSession(),
     )
@@ -107,7 +108,8 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
     # entity_id는 receipt_id다 — 같은 영수증으로 재호출되면 세션이 이어진다.
-    assert sessions_fetched == [(AgentType.CLAIMANT, "rct_1")]
+    # org_id는 body에서 그대로 전달돼야 한다 — tiered-memory-review.html §8 Phase 2.
+    assert sessions_fetched == [(AgentType.CLAIMANT, "rct_1", "org_1")]
     assert drafts_written == [
         {
             "agent": "CLAIMANT",

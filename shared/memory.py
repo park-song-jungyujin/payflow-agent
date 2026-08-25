@@ -47,6 +47,7 @@ class AgentSession(BaseModel):
     session_id: str
     agent_type: AgentType
     entity_id: str
+    org_id: str = ""  # 기존(멀티테넌시 이전) 문서엔 없는 필드라 빈 문자열로 흡수한다
     actor_ref: str | None = None
     status: str = "ACTIVE"  # "ACTIVE" | "CLOSED"
     turns: list[Turn] = []
@@ -60,12 +61,15 @@ def session_id_for(agent_type: AgentType, entity_id: str) -> str:
 
 
 def get_or_create_session(
-    agent_type: AgentType, entity_id: str, actor_ref: str | None = None
+    agent_type: AgentType, entity_id: str, actor_ref: str | None = None, org_id: str = ""
 ) -> AgentSession:
     """entity_id(청구자는 claim_request_id, 집행자는 settlement_run_id)의 진행 중
     세션을 읽어온다. 없으면 메모리상으로만 새로 만든다 — 실제 Firestore 쓰기는
     첫 append_turn 호출 때 일어난다. 같은 entity_id로 반복 호출되는 것 자체가
-    "대화를 이어가는 상황"의 정의다 (schema-contract.md §9)."""
+    "대화를 이어가는 상황"의 정의다 (schema-contract.md §9).
+
+    org_id는 신규 세션 생성 시에만 반영한다 — 기존 세션은 조회로 이어받으므로
+    재기입할 필요가 없다."""
     doc_id = session_id_for(agent_type, entity_id)
     doc = get_client().collection(_COLLECTION).document(doc_id).get()
     if doc.exists:
@@ -75,6 +79,7 @@ def get_or_create_session(
         session_id=doc_id,
         agent_type=agent_type,
         entity_id=entity_id,
+        org_id=org_id,
         actor_ref=actor_ref,
         created_at=now,
         updated_at=now,
@@ -127,16 +132,20 @@ def close_session(session: AgentSession) -> AgentSession:
 
 
 def find_prior_session_summary(
-    agent_type: AgentType, actor_ref: str | None, exclude_entity_id: str
+    agent_type: AgentType, actor_ref: str | None, exclude_entity_id: str, org_id: str
 ) -> str | None:
-    """같은 actor_ref(예: recipient_id)로 이미 닫힌 세션 중 가장 최근 것의 요약을
-    찾는다. "새 세션엔 이전 세션 요약이 들어간다"는 요구사항의 구현체."""
+    """같은 org_id·actor_ref(예: recipient_id)로 이미 닫힌 세션 중 가장 최근 것의
+    요약을 찾는다. "새 세션엔 이전 세션 요약이 들어간다"는 요구사항의 구현체.
+
+    org_id 필터가 없으면 actor_ref(예: 이메일)가 조직 간에 우연히 겹칠 때 다른
+    조직의 세션 요약이 새어나갈 수 있다 — tiered-memory-review.html §7."""
     if not actor_ref:
         return None
     docs = (
         get_client()
         .collection(_COLLECTION)
         .where(filter=FieldFilter("agent_type", "==", agent_type.value))
+        .where(filter=FieldFilter("org_id", "==", org_id))
         .where(filter=FieldFilter("actor_ref", "==", actor_ref))
         .where(filter=FieldFilter("status", "==", "CLOSED"))
         .order_by("updated_at", direction=firestore.Query.DESCENDING)

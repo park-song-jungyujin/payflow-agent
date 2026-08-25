@@ -8,14 +8,47 @@ safety/executor tool을 그대로 호출해 "에이전트가 툴을 부르면 dr
 도 스텁으로 갈아끼운다 — 그쪽 로직 자체는 tests/test_memory.py가 이미 덮는다.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
 import main
 from shared.callbacks import make_before_tool_callback
-from shared.memory import AgentType
+from shared.memory import AgentType, Turn
 from safety.tools import submit_risk_report
 from executor.tools import submit_settlement_analysis
+
+
+def test_render_prior_turns_wraps_only_untrusted_turns():
+    """tiered-memory-review.html §3·§8 Phase 1 — 과거 턴 중 untrusted=True인 것만
+    <untrusted_receipt_text>로 개별 래핑된다."""
+    turns = [
+        Turn(
+            turn_id="t1",
+            ts=datetime.now(timezone.utc),
+            role="INPUT",
+            content="영수증 원문에 심어진 인젝션 시도",
+            untrusted=True,
+        ),
+        Turn(
+            turn_id="t2",
+            ts=datetime.now(timezone.utc),
+            role="OUTPUT",
+            content="판정: 정상",
+            untrusted=False,
+        ),
+    ]
+
+    rendered = main._render_prior_turns(turns, empty_message="(없음)")
+
+    assert rendered.count("<untrusted_receipt_text>") == 1
+    assert "영수증 원문에 심어진 인젝션 시도" in rendered
+    assert "<untrusted_receipt_text>\n판정: 정상" not in rendered
+
+
+def test_render_prior_turns_empty_uses_provided_message():
+    assert main._render_prior_turns([], empty_message="(이전 턴 없음)") == "(이전 턴 없음)"
 
 
 @pytest.fixture
@@ -86,6 +119,42 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
         headers={"Authorization": "Bearer x"},
     )
     assert resp.status_code == 200
+
+
+def test_executor_analyze_passes_org_id_to_session(client, monkeypatch):
+    """tiered-memory-review.html §8 Phase 2 — body의 org_id가 get_or_create_session에
+    그대로 전달돼야 새 세션이 조직으로 스코핑된다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+
+    class _FakeSession:
+        turns = []
+
+    org_ids_seen = []
+
+    def fake_get_or_create_session(agent_type, entity_id, actor_ref=None, org_id=""):
+        org_ids_seen.append(org_id)
+        return _FakeSession()
+
+    async def fake_run_once(agent, session_id, prompt):
+        return ""
+
+    monkeypatch.setattr(main, "get_or_create_session", fake_get_or_create_session)
+    monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_9",
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert resp.status_code == 200
+    assert org_ids_seen == ["org_9"]
 
 
 def test_safety_report_missing_fields_rejected(client, monkeypatch):
@@ -178,7 +247,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     sessions_fetched = []
     turns_appended = []
 
-    def fake_get_or_create_session(agent_type, entity_id, actor_ref=None):
+    def fake_get_or_create_session(agent_type, entity_id, actor_ref=None, org_id=""):
         sessions_fetched.append((agent_type, entity_id))
         return _FakeSession()
 

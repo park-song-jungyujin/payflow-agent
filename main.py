@@ -328,6 +328,11 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     session = await asyncio.to_thread(
         get_or_create_session, AgentType.EXECUTOR, entity_id=run_id, org_id=org_id
     )
+    # close_session은 아래에서 submit_settlement_analysis 성공 확인 후에만 부른다 —
+    # 즉 CLOSED는 "draft가 실제로 써졌다"는 뜻이다. Cloud Tasks 재시도가 이미 성공한
+    # run_id로 다시 들어오면, 다시 분석을 태우지 않고 그대로 200을 반환한다.
+    if session.status == "CLOSED":
+        return {"status": "ok"}
     prior_turns = _render_prior_turns(
         session.turns,
         empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)",
@@ -399,7 +404,6 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         await asyncio.to_thread(
             append_turn, session, role="OUTPUT", content=final_text, untrusted=False
         )
-    await asyncio.to_thread(close_session, session)
 
     # submit_settlement_analysis가 실제로 write_agent_draft까지 성공했는지 확인한다
     # (executor/tools.py 참조). LLM이 툴을 아예 안 부르거나, before_tool_callback의
@@ -409,7 +413,12 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     # 영원히 안 풀리는 조용한 실패였다. 여기서 명시적으로 FAILED를 기록해 web이
     # "분석을 시작하지 못했습니다"를 보여주게 한다(_executor_analysis가 이미
     # status=FAILED를 처리한다 — set_executor_analysis_status와 같은 payload 형태).
-    if final_state.get("executor_submission_status") != "ok":
+    if final_state.get("executor_submission_status") == "ok":
+        # 성공했을 때만 세션을 닫는다 — 위 CLOSED 단락 가드가 "CLOSED == draft
+        # 확정됨"을 전제하기 때문이다. 실패 시엔 ACTIVE로 남겨 다음 재시도가
+        # get_or_create_session으로 이 세션을 이어받아 다시 시도하게 한다.
+        await asyncio.to_thread(close_session, session)
+    else:
         write_agent_draft(
             agent="EXECUTOR",
             target_type="SETTLEMENT_RUN",

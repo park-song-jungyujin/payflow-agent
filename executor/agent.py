@@ -7,6 +7,10 @@ agent_sessions) 모델과 맞지 않아 별도로 설계해야 한다.
 정산 실행(settlement_run_id) 단위로 반복 호출될 수 있어 shared/memory.py
 (agent_sessions)로 세션을 이어간다 — safety_agent와 달리 InMemorySessionService
 만으로 끝나지 않는다. main.py가 호출 전후로 직접 agent_sessions에 턴을 기록한다.
+
+이 에이전트는 한국어만 쓴다. 웹 대시보드의 영어 표시(anomalies_en·
+summary_text_en)는 이제 api/src/guards/translate.py가 draft 쓰기 시점에
+Gemma로 번역해 채운다 — claimant_agent의 requery_message와 같은 방식.
 """
 
 import os
@@ -56,11 +60,6 @@ LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않
 
 이상징후가 하나도 없으면 anomalies는 빈 리스트로 두고, summary_text에도 "이상
 없음" 계열로 명확히 씁니다 — 애매하게 얼버무리지 않습니다.
-
-이 서술은 웹 대시보드가 영어 사용자에게도 보여줍니다. anomalies의 각 항목과
-summary_text를 쓸 때마다, 같은 내용의 영어 번역을 anomalies_en·summary_text_en에
-같은 개수·같은 순서로 함께 작성하세요. 번역이 아니라 새로 판단하지 않습니다 —
-한국어 문장과 정확히 같은 내용이어야 합니다.
 
 작성이 끝나면 반드시 submit_settlement_analysis 툴을 한 번 호출해 결과를
 기록하세요. 이 서술은 조언일 뿐이며 배치 확정 여부는 사람이 결정합니다 — 당신이

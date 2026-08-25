@@ -60,48 +60,9 @@ def test_empty_summary_rejected_without_calling_api(monkeypatch):
         task_id="task_1",
         anomalies=[],
         summary_text="   ",
-        anomalies_en=[],
-        summary_text_en="ok",
     )
 
-    assert result == {"status": "error", "detail": "summary_text/summary_text_en must not be empty"}
-    assert calls == []
-
-
-def test_empty_summary_en_rejected_without_calling_api(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})
-
-    result = tools.submit_settlement_analysis(
-        settlement_run_id="run_1",
-        task_id="task_1",
-        anomalies=[],
-        summary_text="이상 없음",
-        anomalies_en=[],
-        summary_text_en="  ",
-    )
-
-    assert result == {"status": "error", "detail": "summary_text/summary_text_en must not be empty"}
-    assert calls == []
-
-
-def test_mismatched_anomalies_length_rejected(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})
-
-    result = tools.submit_settlement_analysis(
-        settlement_run_id="run_1",
-        task_id="task_1",
-        anomalies=["중복 의심 1건"],
-        summary_text="중복 의심 1건",
-        anomalies_en=[],
-        summary_text_en="1 suspected duplicate",
-    )
-
-    assert result == {
-        "status": "error",
-        "detail": "anomalies and anomalies_en must have the same length",
-    }
+    assert result == {"status": "error", "detail": "summary_text must not be empty"}
     assert calls == []
 
 
@@ -117,20 +78,18 @@ def test_empty_anomalies_list_is_valid(monkeypatch):
         task_id="task_1",
         anomalies=[],
         summary_text="이상 없음",
-        anomalies_en=[],
-        summary_text_en="No anomalies found",
     )
 
     assert result == {"status": "ok", "draft_id": "drf_task_1"}
     assert calls[0]["payload"] == {
         "anomalies": [],
         "summary_text": "이상 없음",
-        "anomalies_en": [],
-        "summary_text_en": "No anomalies found",
     }
 
 
 def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
+    """영어 번역(anomalies_en·summary_text_en)은 이 에이전트가 안 쓴다 — api가
+    draft를 받는 시점에 Gemma로 번역해 채운다(api/src/guards/agent_drafts.py)."""
     calls = []
     monkeypatch.setattr(
         tools, "write_agent_draft", lambda **kw: calls.append(kw) or {"draft_id": "drf_task_1"}
@@ -141,8 +100,6 @@ def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
         task_id="task_1",
         anomalies=["같은 가맹점 · 같은 금액 · 3분 간격 청구 2건"],
         summary_text="중복 의심 1건, 나머지는 이상 없음",
-        anomalies_en=["Same merchant, same amount, two claims 3 minutes apart"],
-        summary_text_en="1 suspected duplicate, no issues otherwise",
     )
 
     assert result == {"status": "ok", "draft_id": "drf_task_1"}
@@ -155,8 +112,6 @@ def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
             "payload": {
                 "anomalies": ["같은 가맹점 · 같은 금액 · 3분 간격 청구 2건"],
                 "summary_text": "중복 의심 1건, 나머지는 이상 없음",
-                "anomalies_en": ["Same merchant, same amount, two claims 3 minutes apart"],
-                "summary_text_en": "1 suspected duplicate, no issues otherwise",
             },
         }
     ]

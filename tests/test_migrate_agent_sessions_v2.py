@@ -24,3 +24,11 @@ def test_should_skip_false_when_source_is_newer():
     existing = {"updated_at": "2026-08-24T00:00:00Z"}
     source = {"updated_at": "2026-08-25T00:00:00Z"}
     assert should_skip(existing, source) is False
+
+
+def test_should_skip_true_when_existing_is_newer():
+    """cutover 이후 memory.py가 target을 계속 갱신해 existing이 source보다 최신인
+    경우 — 재실행 시 stale source가 target을 덮어써 유실이 나면 안 된다."""
+    existing = {"updated_at": "2026-08-25T00:00:00Z"}
+    source = {"updated_at": "2026-08-24T00:00:00Z"}
+    assert should_skip(existing, source) is True

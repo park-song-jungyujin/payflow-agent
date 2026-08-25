@@ -22,8 +22,11 @@ class FakeDocRef:
     def get(self):
         return FakeSnapshot(self._store.get(self.id))
 
-    def set(self, data):
-        self._store[self.id] = data
+    def set(self, data, merge=False):
+        if merge and self.id in self._store:
+            self._store[self.id] = {**self._store[self.id], **data}
+        else:
+            self._store[self.id] = data
 
 
 class FakeQuery:
@@ -270,6 +273,23 @@ def test_close_session_survives_embedding_failure(fake, monkeypatch):
     assert closed.status == "CLOSED"
     stored = fake.data["agent_sessions__org_1"]["EXECUTOR__run_2"]
     assert "summary_embedding" not in stored
+
+
+def test_append_turn_preserves_summary_embedding_on_reopened_session(fake, monkeypatch):
+    """close_session이 저장한 summary_embedding은 AgentSession 모델 필드가 아니라서
+    model_dump에 실리지 않는다. append_turn이 merge=True 없이 .set()하면 이후
+    턴을 추가할 때(예: 닫힌 세션 재사용) 임베딩이 조용히 삭제된다."""
+    monkeypatch.setattr(memory, "_embed_text", lambda text: [0.1, 0.2, 0.3])
+    session = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_1", org_id="org_1"
+    )
+    memory.append_turn(session, role="OUTPUT", content="분석 완료")
+    memory.close_session(session)
+
+    memory.append_turn(session, role="INPUT", content="추가 턴")
+
+    stored = fake.data["agent_sessions__org_1"]["EXECUTOR__run_1"]
+    assert list(stored["summary_embedding"]) == [0.1, 0.2, 0.3]
 
 
 def test_fetch_full_session_requires_org_id_to_locate_partition(fake):

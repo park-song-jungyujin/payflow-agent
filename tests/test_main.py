@@ -311,6 +311,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert sessions_fetched == [(AgentType.EXECUTOR, "run_1")]
     assert "과거 유사 사례: 3턴, 상태 CLOSED" in prompts[0]
     assert "참고용" in prompts[0]
+    assert "org_id: ''" in prompts[0]
     # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
     # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
     assert "A1234" in turns_appended[0]["content"]

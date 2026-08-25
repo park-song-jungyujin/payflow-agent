@@ -216,6 +216,7 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
 
     prompt = (
         f"receipt_id: {receipt_id!r}\n"
+        f"org_id: {org_id!r}\n"
         f"task_id: {task_id!r}\n\n"
         f"{prior_summary_block}"
         f"{similar_summaries_block}"
@@ -289,6 +290,7 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
 
     prompt = (
         f"settlement_run_id: {run_id!r}\n"
+        f"org_id: {org_id!r}\n"
         f"task_id: {task_id!r}\n\n"
         f"{similar_summaries_block}"
         f"이전 턴 기록:\n{prior_turns}\n\n"

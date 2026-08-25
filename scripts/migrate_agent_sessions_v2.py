@@ -18,7 +18,7 @@ def target_collection_for(doc: dict) -> str:
 def should_skip(existing: dict | None, source: dict) -> bool:
     if existing is None:
         return False
-    return existing.get("updated_at") == source.get("updated_at")
+    return existing.get("updated_at") >= source.get("updated_at")
 
 
 def migrate(dry_run: bool = True) -> dict:

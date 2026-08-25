@@ -131,7 +131,7 @@ def append_turn(
     session.turns.append(turn)
     session.updated_at = turn.ts
     get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(
-        session.model_dump(mode="json")
+        session.model_dump(mode="json"), merge=True
     )
     return session
 

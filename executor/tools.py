@@ -23,6 +23,8 @@ def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
     경계 시각을 테스트하기 어렵다)."""
     future_dated = []
     for c in candidate_claims:
+        if not isinstance(c, dict):
+            continue
         txn_date_raw = c.get("transaction_date")
         if not txn_date_raw:
             continue

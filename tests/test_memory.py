@@ -32,6 +32,8 @@ class FakeQuery:
         self._filters = []
         self._order = None
         self._limit = None
+        self._vector_field = None
+        self._query_vector = None
 
     def where(self, filter=None):
         self._filters.append((filter.field_path, filter.value))
@@ -45,11 +47,25 @@ class FakeQuery:
         self._limit = n
         return self
 
+    def find_nearest(self, vector_field, query_vector, limit, distance_measure=None, **kw):
+        self._vector_field = vector_field
+        self._query_vector = list(query_vector)
+        self._limit = limit
+        return self
+
     def stream(self):
-        hits = [
-            d for d in self._docs if all(d.get(f) == v for f, v in self._filters)
-        ]
-        if self._order:
+        hits = [d for d in self._docs if all(d.get(f) == v for f, v in self._filters)]
+        if self._vector_field:
+            def cosine(vec):
+                a, b = list(vec), self._query_vector
+                dot = sum(x * y for x, y in zip(a, b))
+                na = sum(x * x for x in a) ** 0.5
+                nb = sum(x * x for x in b) ** 0.5
+                return dot / (na * nb) if na and nb else 0.0
+
+            hits = [d for d in hits if d.get(self._vector_field) is not None]
+            hits.sort(key=lambda d: cosine(d[self._vector_field]), reverse=True)
+        elif self._order:
             hits = sorted(hits, key=lambda d: d[self._order[0]], reverse=True)
         return iter([FakeSnapshot(d) for d in (hits[: self._limit] if self._limit else hits)])
 
@@ -67,7 +83,7 @@ class FakeCollection:
 
 class FakeClient:
     def __init__(self):
-        self.data = {"agent_sessions": {}}
+        self.data = {}
 
     def collection(self, name):
         return FakeCollection(self.data.setdefault(name, {}))
@@ -88,7 +104,7 @@ def test_get_or_create_session_creates_new_when_absent(fake):
     session = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1")
     assert session.status == "ACTIVE"
     assert session.turns == []
-    assert "CLAIMANT__clm_req_1" not in fake.data["agent_sessions"]  # 아직 안 썼다
+    assert "CLAIMANT__clm_req_1" not in fake.data["agent_sessions__unknown"]  # 아직 안 썼다
 
 
 def test_get_or_create_session_stamps_org_id_on_new_session(fake):
@@ -96,15 +112,17 @@ def test_get_or_create_session_stamps_org_id_on_new_session(fake):
     assert session.org_id == "org_1"
 
 
-def test_get_or_create_session_keeps_existing_org_id_on_reload(fake):
-    """org_id는 신규 생성 시에만 반영한다 — 기존 세션을 다시 조회할 때 다른
-    org_id를 넘겨도 저장된 값이 이긴다."""
+def test_get_or_create_session_with_different_org_id_does_not_reuse_other_partition(fake):
+    """v2 파티셔닝 — org_id는 컬렉션을 고르므로, 다른 org_id로 조회하면
+    남의 세션을 이어받는 대신 자기 파티션에 새 세션이 생긴다."""
     original = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1")
     memory.append_turn(original, role="INPUT", content="첫 턴")
 
-    reloaded = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_2")
+    other = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_2")
 
-    assert reloaded.org_id == "org_1"
+    assert other.org_id == "org_2"
+    assert other.turns == []
+    assert fake.data["agent_sessions__org_1"]["CLAIMANT__clm_req_1"]["org_id"] == "org_1"
 
 
 def test_get_or_create_session_returns_existing_when_present(fake):
@@ -121,9 +139,26 @@ def test_append_turn_persists_immediately(fake):
     session = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1")
     memory.append_turn(session, role="INPUT", content="영수증 검토 요청", untrusted=True)
 
-    doc = fake.data["agent_sessions"]["CLAIMANT__clm_req_1"]
+    doc = fake.data["agent_sessions__unknown"]["CLAIMANT__clm_req_1"]
     assert len(doc["turns"]) == 1
     assert doc["turns"][0]["untrusted"] is True
+
+
+def test_append_turn_writes_to_org_partitioned_collection(fake):
+    session = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1"
+    )
+    memory.append_turn(session, role="INPUT", content="첫 턴")
+
+    assert "CLAIMANT__clm_req_1" in fake.data["agent_sessions__org_1"]
+    assert "agent_sessions" not in fake.data or fake.data["agent_sessions"] == {}
+
+
+def test_append_turn_without_org_id_uses_unknown_partition(fake):
+    session = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_2")
+    memory.append_turn(session, role="INPUT", content="첫 턴")
+
+    assert "CLAIMANT__clm_req_2" in fake.data["agent_sessions__unknown"]
 
 
 def test_close_session_summary_never_contains_amounts(fake):
@@ -210,14 +245,114 @@ def test_find_prior_session_summary_does_not_leak_across_orgs(fake):
     assert result is None
 
 
+def test_close_session_stores_summary_embedding(fake, monkeypatch):
+    monkeypatch.setattr(memory, "_embed_text", lambda text: [0.1, 0.2, 0.3])
+    session = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_1", org_id="org_1"
+    )
+    memory.append_turn(session, role="OUTPUT", content="분석 완료")
+
+    memory.close_session(session)
+
+    stored = fake.data["agent_sessions__org_1"]["EXECUTOR__run_1"]
+    assert list(stored["summary_embedding"]) == [0.1, 0.2, 0.3]
+
+
+def test_close_session_survives_embedding_failure(fake, monkeypatch):
+    monkeypatch.setattr(memory, "_embed_text", lambda text: None)
+    session = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_2", org_id="org_1"
+    )
+    memory.append_turn(session, role="OUTPUT", content="분석 완료")
+
+    closed = memory.close_session(session)
+
+    assert closed.status == "CLOSED"
+    stored = fake.data["agent_sessions__org_1"]["EXECUTOR__run_2"]
+    assert "summary_embedding" not in stored
+
+
+def test_fetch_full_session_requires_org_id_to_locate_partition(fake):
+    session = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1"
+    )
+    memory.append_turn(session, role="INPUT", content="원문")
+
+    fetched = memory.fetch_full_session(session.session_id, org_id="org_1")
+
+    assert fetched.turns[0].content == "원문"
+    assert memory.fetch_full_session(session.session_id, org_id="org_2") is None
+
+
 def test_fetch_full_session_returns_none_when_missing(fake):
-    assert memory.fetch_full_session("CLAIMANT__nope") is None
+    assert memory.fetch_full_session("CLAIMANT__nope", org_id="org_1") is None
 
 
 def test_fetch_full_session_round_trips(fake):
     session = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1")
     memory.append_turn(session, role="INPUT", content="원문")
 
-    fetched = memory.fetch_full_session(session.session_id)
+    fetched = memory.fetch_full_session(session.session_id, org_id="")
 
     assert fetched.turns[0].content == "원문"
+
+
+def test_find_similar_sessions_ranks_by_cosine_similarity(fake, monkeypatch):
+    embeddings = {
+        "run_a": [1.0, 0.0],
+        "run_b": [0.0, 1.0],
+        "query": [0.9, 0.1],
+    }
+    monkeypatch.setattr(
+        memory, "_embed_text", lambda text: next(v for k, v in embeddings.items() if k in text)
+    )
+
+    for entity_id in ("run_a", "run_b"):
+        s = memory.get_or_create_session(
+            memory.AgentType.EXECUTOR, entity_id, org_id="org_1"
+        )
+        memory.append_turn(s, role="OUTPUT", content="분석", doc_refs=[entity_id])
+        memory.close_session(s)
+
+    result = memory.find_similar_sessions(
+        memory.AgentType.EXECUTOR, org_id="org_1", query_text="query",
+        exclude_entity_id="run_new", limit=2,
+    )
+
+    assert result[0] == memory.get_client().collection("agent_sessions__org_1").document(
+        "EXECUTOR__run_a"
+    ).get().to_dict()["summary"]
+
+
+def test_find_similar_sessions_excludes_self_and_other_orgs(fake, monkeypatch):
+    monkeypatch.setattr(memory, "_embed_text", lambda text: [1.0, 0.0])
+
+    same_entity = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_self", org_id="org_1"
+    )
+    memory.append_turn(same_entity, role="OUTPUT", content="분석")
+    memory.close_session(same_entity)
+
+    other_org = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_other", org_id="org_2"
+    )
+    memory.append_turn(other_org, role="OUTPUT", content="분석")
+    memory.close_session(other_org)
+
+    result = memory.find_similar_sessions(
+        memory.AgentType.EXECUTOR, org_id="org_1", query_text="q",
+        exclude_entity_id="run_self", limit=5,
+    )
+
+    assert result == []
+
+
+def test_find_similar_sessions_returns_empty_when_embedding_fails(fake, monkeypatch):
+    monkeypatch.setattr(memory, "_embed_text", lambda text: None)
+
+    result = memory.find_similar_sessions(
+        memory.AgentType.EXECUTOR, org_id="org_1", query_text="q",
+        exclude_entity_id="run_x",
+    )
+
+    assert result == []

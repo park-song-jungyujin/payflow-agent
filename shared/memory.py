@@ -11,12 +11,19 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
+from google import genai
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+from google.cloud.firestore_v1.vector import Vector
 from pydantic import BaseModel
 
 _client: firestore.Client | None = None
-_COLLECTION = "agent_sessions"
+_COLLECTION_PREFIX = "agent_sessions"
+
+
+def _collection_name(org_id: str) -> str:
+    return f"{_COLLECTION_PREFIX}__{org_id}" if org_id else f"{_COLLECTION_PREFIX}__unknown"
 
 
 def get_client() -> firestore.Client:
@@ -27,6 +34,22 @@ def get_client() -> firestore.Client:
             database=os.environ.get("FIRESTORE_DATABASE", "development"),
         )
     return _client
+
+
+_EMBEDDING_MODEL_ENV = "AGENT_MEMORY_EMBEDDING_MODEL"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-005"
+
+
+def _embed_text(text: str) -> list[float] | None:
+    """summary(코드 생성 텍스트)를 임베딩한다. 실패해도 세션 종료를 막지 않는다 —
+    임베딩은 부가 기능이지 필수 경로가 아니다."""
+    try:
+        client = genai.Client()
+        model = os.environ.get(_EMBEDDING_MODEL_ENV, _DEFAULT_EMBEDDING_MODEL)
+        response = client.models.embed_content(model=model, contents=text)
+        return list(response.embeddings[0].values)
+    except Exception:
+        return None
 
 
 class AgentType(str, Enum):
@@ -71,7 +94,7 @@ def get_or_create_session(
     org_id는 신규 세션 생성 시에만 반영한다 — 기존 세션은 조회로 이어받으므로
     재기입할 필요가 없다."""
     doc_id = session_id_for(agent_type, entity_id)
-    doc = get_client().collection(_COLLECTION).document(doc_id).get()
+    doc = get_client().collection(_collection_name(org_id)).document(doc_id).get()
     if doc.exists:
         return AgentSession.model_validate(doc.to_dict())
     now = datetime.now(timezone.utc)
@@ -107,7 +130,7 @@ def append_turn(
     )
     session.turns.append(turn)
     session.updated_at = turn.ts
-    get_client().collection(_COLLECTION).document(session.session_id).set(
+    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(
         session.model_dump(mode="json")
     )
     return session
@@ -116,7 +139,8 @@ def append_turn(
 def close_session(session: AgentSession) -> AgentSession:
     """세션을 CLOSED로 전환하고 결정론적 요약을 생성한다. 요약은 LLM이 아니라
     코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수와
-    관련 문서 ID만 남긴다."""
+    관련 문서 ID만 남긴다. 요약 임베딩은 있으면 같이 저장하고, 실패해도
+    세션 종료는 계속 진행한다."""
     doc_refs = sorted({ref for turn in session.turns for ref in turn.doc_refs})
     session.summary = (
         f"{len(session.turns)}턴, 관련 문서 {doc_refs}, 상태 CLOSED"
@@ -125,9 +149,11 @@ def close_session(session: AgentSession) -> AgentSession:
     )
     session.status = "CLOSED"
     session.updated_at = datetime.now(timezone.utc)
-    get_client().collection(_COLLECTION).document(session.session_id).set(
-        session.model_dump(mode="json")
-    )
+    data = session.model_dump(mode="json")
+    embedding = _embed_text(session.summary)
+    if embedding is not None:
+        data["summary_embedding"] = Vector(embedding)
+    get_client().collection(_collection_name(session.org_id)).document(session.session_id).set(data)
     return session
 
 
@@ -143,7 +169,7 @@ def find_prior_session_summary(
         return None
     docs = (
         get_client()
-        .collection(_COLLECTION)
+        .collection(_collection_name(org_id))
         .where(filter=FieldFilter("agent_type", "==", agent_type.value))
         .where(filter=FieldFilter("org_id", "==", org_id))
         .where(filter=FieldFilter("actor_ref", "==", actor_ref))
@@ -159,8 +185,49 @@ def find_prior_session_summary(
     return None
 
 
-def fetch_full_session(session_id: str) -> AgentSession | None:
+def find_similar_sessions(
+    agent_type: AgentType,
+    org_id: str,
+    query_text: str,
+    exclude_entity_id: str,
+    limit: int = 3,
+) -> list[str]:
+    """agent-session-memory-v2-design.md §3 — actor_ref가 달라도 같은 org 안에서
+    의미상 유사한 과거 종료 세션을 찾는다. `summary`(코드 생성 텍스트)만
+    반환한다 — 턴 원문은 절대 돌려주지 않는다. 임베딩 실패 시 빈 리스트."""
+    embedding = _embed_text(query_text)
+    if embedding is None:
+        return []
+    docs = (
+        get_client()
+        .collection(_collection_name(org_id))
+        .where(filter=FieldFilter("agent_type", "==", agent_type.value))
+        .where(filter=FieldFilter("status", "==", "CLOSED"))
+        .find_nearest(
+            vector_field="summary_embedding",
+            query_vector=Vector(embedding),
+            limit=limit + 1,
+            distance_measure=DistanceMeasure.COSINE,
+        )
+        .stream()
+    )
+    results = []
+    for doc in docs:
+        data = doc.to_dict()
+        if data.get("entity_id") == exclude_entity_id:
+            continue
+        if data.get("summary"):
+            results.append(data["summary"])
+        if len(results) == limit:
+            break
+    return results
+
+
+def fetch_full_session(session_id: str, org_id: str) -> AgentSession | None:
     """과거 세션의 턴 원문 전체를 불러온다. `fetch_full_session_history` 툴이 이
-    함수를 감싼다 — 에이전트가 요약만으로 부족할 때 호출한다."""
-    doc = get_client().collection(_COLLECTION).document(session_id).get()
+    함수를 감싼다 — 에이전트가 요약만으로 부족할 때 호출한다.
+
+    org_id는 컬렉션명을 계산하는 데만 쓴다 — v2부터 세션이 org별로 파티셔닝돼
+    있어 org_id 없이는 어느 컬렉션을 봐야 할지 알 수 없다."""
+    doc = get_client().collection(_collection_name(org_id)).document(session_id).get()
     return AgentSession.model_validate(doc.to_dict()) if doc.exists else None

@@ -25,7 +25,13 @@ from claimant.agent import root_agent as claimant_agent  # noqa: E402
 from claimant.receipt_text import ReceiptTextUnavailable, fetch_raw_text  # noqa: E402
 from executor.agent import root_agent as executor_agent  # noqa: E402
 from safety.agent import root_agent as safety_agent  # noqa: E402
-from shared.memory import AgentType, Turn, append_turn, get_or_create_session  # noqa: E402
+from shared.memory import (  # noqa: E402
+    AgentType,
+    Turn,
+    append_turn,
+    find_prior_session_summary,
+    get_or_create_session,
+)
 
 app = FastAPI()
 _google_request = google_requests.Request()
@@ -128,9 +134,11 @@ async def safety_report(body: dict, authorization: str = Header(default="")):
 async def claimant_review(body: dict, authorization: str = Header(default="")):
     """schema-contract.md §9 — 파싱이 PARSED로 확정한 직후 api가 부른다.
 
-    본문에는 파싱 스냅샷 7필드가 실려 온다(원문은 `raw_text_gcs_uri`로만 온다 —
-    큐 본문에 원문을 실으면 §2가 막아둔 유출 경로가 열린다). executor 라우트와
-    같은 형태이고, 다른 점은 entity_id가 receipt_id라는 것뿐이다.
+    본문에는 파싱 스냅샷 7필드 + org_id + recipient_id가 실려 온다(원문은
+    `raw_text_gcs_uri`로만 온다 — 큐 본문에 원문을 실으면 §2가 막아둔 유출 경로가
+    열린다). executor 라우트와 같은 형태이고, 다른 점은 entity_id가 receipt_id라는
+    것뿐이다. recipient_id는 agent_sessions.actor_ref로 쓰여 같은 청구자의 이전
+    영수증 세션 요약을 찾는 연결 키가 된다(agent-session-memory.html 결정 3).
     """
     _verify_oidc(authorization)
 
@@ -149,9 +157,26 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         raw_text = f"(원문을 읽지 못했습니다: {e})"
 
     org_id = body.get("org_id", "")
-    session = get_or_create_session(AgentType.CLAIMANT, entity_id=receipt_id, org_id=org_id)
+    recipient_id = body.get("recipient_id")
+    session = get_or_create_session(
+        AgentType.CLAIMANT, entity_id=receipt_id, actor_ref=recipient_id, org_id=org_id
+    )
     prior_turns = _render_prior_turns(
         session.turns, empty_message="(이전 턴 없음 — 이번이 이 영수증의 첫 검토입니다)"
+    )
+    # agent-session-memory.html 결정 3 — "새 세션엔 이전 세션 요약이 들어간다".
+    # session.turns가 비어 있을 때(=이 receipt_id로는 첫 호출)만 조회한다 —
+    # 재시도로 이어받은 세션에는 이미 자기 자신의 턴 기록이 prior_turns로 들어가므로
+    # 중복해서 얹을 필요가 없다.
+    prior_summary = (
+        find_prior_session_summary(
+            AgentType.CLAIMANT, actor_ref=recipient_id, exclude_entity_id=receipt_id, org_id=org_id
+        )
+        if not session.turns
+        else None
+    )
+    prior_summary_block = (
+        f"이 청구자의 이전 영수증 세션 요약:\n{prior_summary}\n\n" if prior_summary else ""
     )
 
     snapshot = {
@@ -177,6 +202,7 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
     prompt = (
         f"receipt_id: {receipt_id!r}\n"
         f"task_id: {task_id!r}\n\n"
+        f"{prior_summary_block}"
         f"이전 턴 기록:\n{prior_turns}\n\n"
         "<untrusted_receipt_text>\n"
         f"{untrusted_block}\n"

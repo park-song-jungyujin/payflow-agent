@@ -29,6 +29,7 @@ _BODY = {
     "receipt_id": "rct_1",
     "task_id": "CLAIMANT:rct_1",
     "org_id": "org_1",
+    "recipient_id": "rcp_1",
     "merchant_name": "스타벅스 강남점",
     "transaction_date": "2026-08-05",
     "parsed_amount_minor": None,
@@ -68,13 +69,14 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
         main,
         "get_or_create_session",
         lambda agent_type, entity_id, actor_ref=None, org_id="": sessions_fetched.append(
-            (agent_type, entity_id, org_id)
+            (agent_type, entity_id, actor_ref, org_id)
         )
         or _FakeSession(),
     )
     monkeypatch.setattr(
         main, "append_turn", lambda session, **kw: turns_appended.append(kw) or session
     )
+    monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
 
     prompts = []
 
@@ -109,7 +111,8 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     assert resp.json() == {"status": "ok"}
     # entity_id는 receipt_id다 — 같은 영수증으로 재호출되면 세션이 이어진다.
     # org_id는 body에서 그대로 전달돼야 한다 — tiered-memory-review.html §8 Phase 2.
-    assert sessions_fetched == [(AgentType.CLAIMANT, "rct_1", "org_1")]
+    # actor_ref(recipient_id)도 함께 전달돼야 이전 세션 요약 조회의 연결 키가 된다.
+    assert sessions_fetched == [(AgentType.CLAIMANT, "rct_1", "rcp_1", "org_1")]
     assert drafts_written == [
         {
             "agent": "CLAIMANT",
@@ -152,6 +155,7 @@ def test_unreadable_raw_text_does_not_block_the_review(client, oidc_ok, monkeypa
     monkeypatch.setattr(main, "fetch_raw_text", boom)
     monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+    monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
 
     prompts = []
 
@@ -175,6 +179,7 @@ def test_no_raw_text_uri_is_not_an_error(client, oidc_ok, monkeypatch):
     monkeypatch.setattr(main, "fetch_raw_text", lambda uri, **kw: called.append(uri) or "")
     monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+    monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
 
     async def fake_run_once(agent, session_id, prompt):
         return ""
@@ -189,3 +194,77 @@ def test_no_raw_text_uri_is_not_an_error(client, oidc_ok, monkeypatch):
 
     assert resp.status_code == 200
     assert called == []  # URI가 없으면 GCS를 부르지도 않는다
+
+
+def test_new_session_injects_prior_session_summary(client, oidc_ok, monkeypatch):
+    """agent-session-memory.html 결정 3 — "새 세션엔 이전 세션 요약이 들어간다".
+    이 receipt_id로는 첫 호출(session.turns == [])이면 같은 recipient_id의
+    이전 닫힌 세션 요약을 찾아 프롬프트에 얹는다."""
+    monkeypatch.setattr(main, "fetch_raw_text", lambda uri, **kw: "")
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
+    monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+
+    summary_calls = []
+
+    def fake_find_prior_session_summary(agent_type, *, actor_ref, exclude_entity_id, org_id):
+        summary_calls.append((agent_type, actor_ref, exclude_entity_id, org_id))
+        return "2턴, 관련 문서 ['rct_old'], 상태 CLOSED"
+
+    monkeypatch.setattr(main, "find_prior_session_summary", fake_find_prior_session_summary)
+
+    prompts = []
+
+    async def fake_run_once(agent, session_id, prompt):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+
+    resp = client.post(
+        "/agents/claimant/review", json=_BODY, headers={"Authorization": "Bearer x"}
+    )
+
+    assert resp.status_code == 200
+    assert summary_calls == [(AgentType.CLAIMANT, "rcp_1", "rct_1", "org_1")]
+    assert "이 청구자의 이전 영수증 세션 요약" in prompts[0]
+    assert "2턴, 관련 문서 ['rct_old'], 상태 CLOSED" in prompts[0]
+
+
+def test_continuing_session_skips_prior_session_summary_lookup(client, oidc_ok, monkeypatch):
+    """session.turns가 이미 있으면(같은 receipt_id 재시도) 자기 자신의 턴 기록이
+    이미 prior_turns로 들어가므로 find_prior_session_summary를 또 부르지 않는다."""
+    from datetime import datetime, timezone
+
+    from shared.memory import Turn
+
+    class _ContinuingSession:
+        turns = [
+            Turn(
+                turn_id="t1",
+                ts=datetime.now(timezone.utc),
+                role="INPUT",
+                content="이전 시도",
+                untrusted=True,
+            )
+        ]
+
+    monkeypatch.setattr(main, "fetch_raw_text", lambda uri, **kw: "")
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _ContinuingSession())
+    monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+
+    summary_calls = []
+    monkeypatch.setattr(
+        main, "find_prior_session_summary", lambda *a, **kw: summary_calls.append(1)
+    )
+
+    async def fake_run_once(agent, session_id, prompt):
+        return ""
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+
+    resp = client.post(
+        "/agents/claimant/review", json=_BODY, headers={"Authorization": "Bearer x"}
+    )
+
+    assert resp.status_code == 200
+    assert summary_calls == []

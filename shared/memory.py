@@ -242,7 +242,12 @@ def close_session(session: AgentSession) -> AgentSession:
     """세션을 CLOSED로 전환하고 결정론적 요약을 생성한다. 요약은 LLM이 아니라
     코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수,
     코드 추출 사건 특징, 관련 문서 ID만 남긴다. 요약 임베딩은 있으면 같이
-    저장하고, 실패해도 세션 종료는 계속 진행한다."""
+    저장하고, 실패해도 세션 종료는 계속 진행한다.
+
+    이미 CLOSED인 세션이면 그대로 반환한다 — 재호출마다 요약을 다시 만들고
+    임베딩 API를 다시 태우는 걸 막는다."""
+    if session.status == "CLOSED":
+        return session
     doc_refs = sorted({ref for turn in session.turns for ref in turn.doc_refs})
     features_str = ""
     if session.case_features:

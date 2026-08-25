@@ -186,6 +186,23 @@ def test_close_session_summary_without_doc_refs_omits_them(fake):
     assert "1턴" in closed.summary
 
 
+def test_close_session_is_idempotent(fake, monkeypatch):
+    """이미 CLOSED인 세션을 다시 닫아도 요약을 재생성하지 않는다."""
+    session = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_1")
+    memory.append_turn(session, role="OUTPUT", content="분석 완료")
+    closed = memory.close_session(session)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("이미 CLOSED인 세션에 임베딩을 다시 호출하면 안 된다")
+
+    monkeypatch.setattr(memory, "_embed_text", _boom)
+
+    reclosed = memory.close_session(closed)
+
+    assert reclosed is closed
+    assert reclosed.summary == closed.summary
+
+
 def test_find_prior_session_summary_excludes_current_entity(fake):
     """같은 actor_ref라도 지금 처리 중인 entity_id 자신의 과거 종료 세션은 제외해야
     한다 — 아니면 자기 자신을 "이전 세션"으로 착각한다."""

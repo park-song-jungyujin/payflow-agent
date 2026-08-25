@@ -219,6 +219,7 @@ def test_new_session_injects_prior_session_summary(client, oidc_ok, monkeypatch)
         return "2턴, 관련 문서 ['rct_old'], 상태 CLOSED"
 
     monkeypatch.setattr(main, "find_prior_session_summary", fake_find_prior_session_summary)
+    monkeypatch.setattr(main, "find_similar_sessions", lambda *a, **kw: [])
 
     prompts = []
 
@@ -276,3 +277,44 @@ def test_continuing_session_skips_prior_session_summary_lookup(client, oidc_ok, 
 
     assert resp.status_code == 200
     assert summary_calls == []
+
+
+def test_continuing_session_skips_similar_sessions_lookup(client, oidc_ok, monkeypatch):
+    """session.turns가 이미 있으면(같은 receipt_id 재시도) find_similar_sessions도
+    또 부르지 않는다 — find_prior_session_summary와 같은 'not session.turns' 조건."""
+    from datetime import datetime, timezone
+
+    from shared.memory import Turn
+
+    class _ContinuingSession:
+        turns = [
+            Turn(
+                turn_id="t1",
+                ts=datetime.now(timezone.utc),
+                role="INPUT",
+                content="이전 시도",
+                untrusted=True,
+            )
+        ]
+
+    monkeypatch.setattr(main, "fetch_raw_text", lambda uri, **kw: "")
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _ContinuingSession())
+    monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
+    monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
+
+    similar_calls = []
+    monkeypatch.setattr(
+        main, "find_similar_sessions", lambda *a, **kw: similar_calls.append(1)
+    )
+
+    async def fake_run_once(agent, session_id, prompt):
+        return ""
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+
+    resp = client.post(
+        "/agents/claimant/review", json=_BODY, headers={"Authorization": "Bearer x"}
+    )
+
+    assert resp.status_code == 200
+    assert similar_calls == []

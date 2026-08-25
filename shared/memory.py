@@ -6,6 +6,7 @@
 안전 확인 에이전트는 쓰지 않는다 — 1회성 호출이라 이어갈 세션이 없다.
 """
 
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 
 _client: firestore.Client | None = None
 _COLLECTION_PREFIX = "agent_sessions"
+_log = logging.getLogger(__name__)
 
 
 def _collection_name(org_id: str) -> str:
@@ -49,6 +51,7 @@ def _embed_text(text: str) -> list[float] | None:
         response = client.models.embed_content(model=model, contents=text)
         return list(response.embeddings[0].values)
     except Exception:
+        _log.warning("agent_sessions 임베딩 실패 — 유사 세션 검색이 조용히 비활성화된다", exc_info=True)
         return None
 
 

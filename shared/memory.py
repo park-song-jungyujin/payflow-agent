@@ -198,29 +198,32 @@ def find_similar_sessions(
     embedding = _embed_text(query_text)
     if embedding is None:
         return []
-    docs = (
-        get_client()
-        .collection(_collection_name(org_id))
-        .where(filter=FieldFilter("agent_type", "==", agent_type.value))
-        .where(filter=FieldFilter("status", "==", "CLOSED"))
-        .find_nearest(
-            vector_field="summary_embedding",
-            query_vector=Vector(embedding),
-            limit=limit + 1,
-            distance_measure=DistanceMeasure.COSINE,
+    try:
+        docs = (
+            get_client()
+            .collection(_collection_name(org_id))
+            .where(filter=FieldFilter("agent_type", "==", agent_type.value))
+            .where(filter=FieldFilter("status", "==", "CLOSED"))
+            .find_nearest(
+                vector_field="summary_embedding",
+                query_vector=Vector(embedding),
+                limit=limit + 1,
+                distance_measure=DistanceMeasure.COSINE,
+            )
+            .stream()
         )
-        .stream()
-    )
-    results = []
-    for doc in docs:
-        data = doc.to_dict()
-        if data.get("entity_id") == exclude_entity_id:
-            continue
-        if data.get("summary"):
-            results.append(data["summary"])
-        if len(results) == limit:
-            break
-    return results
+        results = []
+        for doc in docs:
+            data = doc.to_dict()
+            if data.get("entity_id") == exclude_entity_id:
+                continue
+            if data.get("summary"):
+                results.append(data["summary"])
+            if len(results) == limit:
+                break
+        return results
+    except Exception:
+        return []
 
 
 def fetch_full_session(session_id: str, org_id: str) -> AgentSession | None:

@@ -356,3 +356,28 @@ def test_find_similar_sessions_returns_empty_when_embedding_fails(fake, monkeypa
     )
 
     assert result == []
+
+
+def test_find_similar_sessions_returns_empty_when_firestore_query_fails(fake, monkeypatch):
+    """find_nearest 대상 벡터 인덱스가 아직 없는 org에서 Firestore가
+    FAILED_PRECONDITION 등을 던져도 find_similar_sessions는 예외를 삼키고
+    빈 리스트로 안전하게 내려가야 한다."""
+    monkeypatch.setattr(memory, "_embed_text", lambda text: [1.0, 0.0])
+
+    class BoomQuery:
+        def where(self, filter=None):
+            return self
+
+        def find_nearest(self, **kw):
+            raise RuntimeError("FAILED_PRECONDITION: no matching vector index")
+
+    monkeypatch.setattr(memory, "get_client", lambda: type(
+        "C", (), {"collection": lambda self, name: BoomQuery()}
+    )())
+
+    result = memory.find_similar_sessions(
+        memory.AgentType.EXECUTOR, org_id="org_1", query_text="q",
+        exclude_entity_id="run_x",
+    )
+
+    assert result == []

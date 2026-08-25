@@ -95,6 +95,28 @@ def test_claimant_route_requires_receipt_id(client, monkeypatch):
     assert resp.status_code == 400
 
 
+def test_claimant_route_requires_org_id(client, monkeypatch):
+    """org_id 없이 agent_sessions를 쓰면 __unknown 파티션에 뭉쳐 조직 간 세션 요약이
+    샐 수 있다 — 재시도해도 안 고쳐지는 호출부 버그라 400으로 끊는다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+    resp = client.post(
+        "/agents/claimant/review",
+        json={"receipt_id": "rct_1", "task_id": "task_1"},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_executor_analyze_requires_org_id(client, monkeypatch):
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+
+
 def test_executor_analyze_missing_fields_rejected(client, monkeypatch):
     monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
     resp = client.post(
@@ -120,7 +142,12 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
 
     resp = client.post(
         "/agents/executor/analyze",
-        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+        },
         headers={"Authorization": "Bearer x"},
     )
     assert resp.status_code == 200
@@ -316,6 +343,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "exact_duplicate_groups": [
                 {"claim_ids": ["clm_1", "clm_2"], "receipt_serial_number": "A1234"}
             ],
+            "org_id": "org_1",
         },
         headers={"Authorization": "Bearer x"},
     )
@@ -325,7 +353,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert sessions_fetched == [(AgentType.EXECUTOR, "run_1")]
     assert "과거 유사 사례: 3턴, 상태 CLOSED" in prompts[0]
     assert "참고용" in prompts[0]
-    assert "org_id: ''" in prompts[0]
+    assert "org_id: 'org_1'" in prompts[0]
     # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
     # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
     assert "A1234" in turns_appended[0]["content"]
@@ -383,7 +411,12 @@ def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(clie
 
     resp = client.post(
         "/agents/executor/analyze",
-        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+        },
         headers={"Authorization": "Bearer x"},
     )
 

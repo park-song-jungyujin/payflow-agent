@@ -172,8 +172,15 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
 
     receipt_id = body.get("receipt_id")
     task_id = body.get("task_id")
+    org_id = body.get("org_id")
     if not receipt_id or not task_id:
         raise HTTPException(status_code=400, detail="receipt_id, task_id required")
+    # org_id 없이 agent_sessions를 쓰면 __unknown 파티션에 뭉쳐 조직 간 세션 요약이
+    # 새어나갈 수 있다(shared/memory.py 경계 원칙) — api는 항상 org_id를 채워
+    # 보내므로(parsing/enqueue.py), 없으면 호출부 버그다. 재시도해도 안 고쳐지니
+    # 400으로 끊어 Cloud Tasks가 무한 재시도하지 않게 한다.
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
 
     # 원문을 못 읽어도 멈추지 않는다 — 구조화 필드만으로도 (a)금액 없음·(b)날짜 없음
     # 판정은 가능하다. 여기서 500을 내면 Cloud Tasks가 재시도하고, 재시도가 계속
@@ -184,7 +191,6 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
     except ReceiptTextUnavailable as e:
         raw_text = f"(원문을 읽지 못했습니다: {e})"
 
-    org_id = body.get("org_id", "")
     recipient_id = body.get("recipient_id")
     # get_or_create_session·find_prior_session_summary·find_similar_sessions·
     # append_turn·close_session은 전부 동기 Firestore/임베딩 호출이다. async
@@ -302,17 +308,21 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     candidate_claims = body.get("candidate_claims")
     duplicate_groups = body.get("duplicate_groups") or []
     exact_duplicate_groups = body.get("exact_duplicate_groups") or []
+    org_id = body.get("org_id")
     if not run_id or not task_id or candidate_claims is None:
         raise HTTPException(
             status_code=400,
             detail="settlement_run_id, task_id, candidate_claims required",
         )
+    # claimant_review와 같은 이유(shared/memory.py 경계 원칙) — org_id 없이
+    # 재시도해도 안 고쳐지니 400으로 끊는다.
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
 
     # agent_sessions는 entity_id=settlement_run_id 기준이다 — actor_ref를 쓸 자연스러운
     # 값이 없다(정산 실행은 특정 수취인 하나에 묶이지 않는다). 그래서
     # find_prior_session_summary는 부르지 않는다 — 같은 run_id로 다시 호출될 때의
     # 연속성은 get_or_create_session이 같은 세션 문서를 찾아오는 것만으로 충분하다.
-    org_id = body.get("org_id", "")
     # claimant_review와 같은 이유 — 동기 Firestore 호출을 스레드풀로 위임해
     # 이벤트 루프를 블로킹하지 않는다.
     session = await asyncio.to_thread(

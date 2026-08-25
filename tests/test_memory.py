@@ -91,6 +91,22 @@ def test_get_or_create_session_creates_new_when_absent(fake):
     assert "CLAIMANT__clm_req_1" not in fake.data["agent_sessions"]  # 아직 안 썼다
 
 
+def test_get_or_create_session_stamps_org_id_on_new_session(fake):
+    session = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1")
+    assert session.org_id == "org_1"
+
+
+def test_get_or_create_session_keeps_existing_org_id_on_reload(fake):
+    """org_id는 신규 생성 시에만 반영한다 — 기존 세션을 다시 조회할 때 다른
+    org_id를 넘겨도 저장된 값이 이긴다."""
+    original = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1")
+    memory.append_turn(original, role="INPUT", content="첫 턴")
+
+    reloaded = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_2")
+
+    assert reloaded.org_id == "org_1"
+
+
 def test_get_or_create_session_returns_existing_when_present(fake):
     existing = memory.get_or_create_session(memory.AgentType.CLAIMANT, "clm_req_1")
     memory.append_turn(existing, role="INPUT", content="첫 턴")
@@ -135,32 +151,60 @@ def test_close_session_summary_without_doc_refs_omits_them(fake):
 def test_find_prior_session_summary_excludes_current_entity(fake):
     """같은 actor_ref라도 지금 처리 중인 entity_id 자신의 과거 종료 세션은 제외해야
     한다 — 아니면 자기 자신을 "이전 세션"으로 착각한다."""
-    s1 = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_old", actor_ref="rcp_1")
+    s1 = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_old", actor_ref="rcp_1", org_id="org_1"
+    )
     memory.append_turn(s1, role="OUTPUT", content="이전 분석")
     memory.close_session(s1)
 
-    s2 = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_new", actor_ref="rcp_1")
+    s2 = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_new", actor_ref="rcp_1", org_id="org_1"
+    )
     memory.append_turn(s2, role="OUTPUT", content="같은 run의 재시도")
     memory.close_session(s2)
 
     result = memory.find_prior_session_summary(
-        memory.AgentType.EXECUTOR, actor_ref="rcp_1", exclude_entity_id="run_new"
+        memory.AgentType.EXECUTOR, actor_ref="rcp_1", exclude_entity_id="run_new", org_id="org_1"
     )
 
     assert result == s1.summary  # run_new(자기 자신)는 후보에서 빠진다
 
 
 def test_find_prior_session_summary_returns_none_without_actor_ref(fake):
-    assert memory.find_prior_session_summary(memory.AgentType.EXECUTOR, None, "run_1") is None
+    assert (
+        memory.find_prior_session_summary(memory.AgentType.EXECUTOR, None, "run_1", org_id="org_1")
+        is None
+    )
 
 
 def test_find_prior_session_summary_skips_open_sessions(fake):
     """status=CLOSED 필터 — 아직 진행 중인 세션은 후보가 아니다."""
-    session = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_open", actor_ref="rcp_1")
+    session = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_open", actor_ref="rcp_1", org_id="org_1"
+    )
     memory.append_turn(session, role="OUTPUT", content="진행 중")  # close 안 함
 
     result = memory.find_prior_session_summary(
-        memory.AgentType.EXECUTOR, actor_ref="rcp_1", exclude_entity_id="run_new"
+        memory.AgentType.EXECUTOR, actor_ref="rcp_1", exclude_entity_id="run_new", org_id="org_1"
+    )
+
+    assert result is None
+
+
+def test_find_prior_session_summary_does_not_leak_across_orgs(fake):
+    """tiered-memory-review.html §7 — 서로 다른 조직이 같은 actor_ref(예: 이메일
+    재사용)를 갖더라도, org_id가 다르면 상대 조직의 세션 요약을 돌려주면 안 된다."""
+    other_org = memory.get_or_create_session(
+        memory.AgentType.EXECUTOR, "run_other_org", actor_ref="shared@example.com", org_id="org_A"
+    )
+    memory.append_turn(other_org, role="OUTPUT", content="org_A의 분석 내용")
+    memory.close_session(other_org)
+
+    result = memory.find_prior_session_summary(
+        memory.AgentType.EXECUTOR,
+        actor_ref="shared@example.com",
+        exclude_entity_id="run_new",
+        org_id="org_B",
     )
 
     assert result is None

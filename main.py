@@ -398,7 +398,10 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         "그대로 넘기세요."
     )
     final_text, final_state = await _run_once(
-        executor_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
+        executor_agent,
+        session_id=task_id,
+        prompt=prompt,
+        state={"org_id": org_id, "candidate_claims": candidate_claims},
     )
     if final_text:
         await asyncio.to_thread(

@@ -48,10 +48,12 @@ def test_check_future_dated_claims_uses_server_clock(monkeypatch):
             return datetime(2026, 8, 23, tzinfo=tz)
 
     monkeypatch.setattr(tools, "datetime", _FixedDatetime)
+    tool_context = _FakeToolContext()
+    tool_context.state["candidate_claims"] = [
+        {"claim_id": "clm_01MOQBR9F49HMKY6AW61Z14PXG", "transaction_date": "2026-07-17"}
+    ]
 
-    result = tools.check_future_dated_claims(
-        [{"claim_id": "clm_01MOQBR9F49HMKY6AW61Z14PXG", "transaction_date": "2026-07-17"}]
-    )
+    result = tools.check_future_dated_claims(tool_context)
 
     assert result == {"today": "2026-08-23", "future_dated": []}
 

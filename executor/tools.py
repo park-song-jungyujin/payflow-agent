@@ -37,21 +37,26 @@ def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
     return future_dated
 
 
-def check_future_dated_claims(candidate_claims: list[dict]) -> dict:
-    """candidate_claims 중 거래일자가 서버 기준 오늘보다 미래인 건을 찾는다.
+def check_future_dated_claims(tool_context: ToolContext) -> dict:
+    """candidate_claims 중 거래일자가 서버 기준 오늘보다 미래인 건을 찾는다. 인자가
+    없다 — candidate_claims는 main.py가 세션 state에 미리 넣어둔 값을 그대로 쓴다.
 
     이상징후 서술 전에 날짜 관련 판단이 필요하면 반드시 이 툴을 먼저 호출하고,
     그 결과에 있는 claim_id만 "미래 거래일" 이상징후로 서술한다. 이 목록에 없는
     claim을 날짜 이유로 이상징후에 넣지 않는다 — "오늘"의 기준은 이 툴이 반환한
     결과이지 당신의 추정이 아니다.
 
-    candidate_claims: 프롬프트에 주어진 후보 claim 목록을 그대로 넘긴다. 각 항목은
-        최소 claim_id, transaction_date("YYYY-MM-DD" 또는 null)를 갖는다.
+    LLM이 candidate_claims를 인자로 직접 넘기게 하면, 프롬프트에 이미 있는 JSON을
+    tool call 인자로 다시 옮겨적는 과정에서 배열 원소를 객체 대신 문자열로 축약해
+    AttributeError로 죽는 사례가 반복됐다(2026-08-25 hotfix). state에서 직접 읽어
+    이 재전사 자체를 없앤다.
+
     반환: {"today": "YYYY-MM-DD", "future_dated": [{"claim_id": str, "transaction_date": str}, ...]}
         transaction_date가 없는 claim은 판정 대상에서 제외한다(근거 없는 필드는
         비교하지 않는다 — schema-contract.md §2 검증 절 verify_passed와 같은 원칙).
         future_dated가 빈 리스트면 미래 거래일 건이 없다는 뜻이다.
     """
+    candidate_claims = tool_context.state.get("candidate_claims") or []
     today = datetime.now(UTC).date()
     return {"today": today.isoformat(), "future_dated": _future_dated(candidate_claims, today)}
 

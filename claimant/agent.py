@@ -9,7 +9,7 @@ CLAUDE.md: 파싱 결과 검토, 업무용·개인용 분류, 재요청 문안 �
 의도적이다 — 근거 없는 규칙은 모델이 잘 안 지킨다.
 
 청구 요청 단위로 반복 호출될 수 있어 shared/memory.py(agent_sessions)로 세션을
-이어간다 — safety_agent와 달리 InMemorySessionService만으로 끝나지 않는다.
+이어간다 — InMemorySessionService만으로는 끝나지 않는다.
 """
 
 import os

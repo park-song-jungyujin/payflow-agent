@@ -34,22 +34,22 @@ def test_write_agent_draft_posts_expected_body_and_auth_header(monkeypatch):
     monkeypatch.setattr(api_client.requests, "post", fake_post)
 
     result = api_client.write_agent_draft(
-        agent="SAFETY",
+        agent="EXECUTOR",
         target_type="SETTLEMENT_RUN",
         target_id="run_1",
         task_id="task_1",
-        payload={"risk_report": "..."},
+        payload={"anomalies": []},
     )
 
     assert result == {"draft_id": "drf_1", "status": "ok"}
     assert captured["url"] == "https://api.test.invalid/agents/drafts"
     assert captured["headers"] == {"Authorization": "Bearer fake-id-token"}
     assert captured["json"] == {
-        "agent": "SAFETY",
+        "agent": "EXECUTOR",
         "target_type": "SETTLEMENT_RUN",
         "target_id": "run_1",
         "task_id": "task_1",
-        "payload": {"risk_report": "..."},
+        "payload": {"anomalies": []},
     }
 
 
@@ -63,12 +63,12 @@ def test_record_tool_call_audit_posts_to_audit_path(monkeypatch):
     )
 
     api_client.record_tool_call_audit(
-        agent="SAFETY", action="TOOL_CALL_REJECTED", run_id="run_1", reason="cap exceeded"
+        agent="EXECUTOR", action="TOOL_CALL_REJECTED", run_id="run_1", reason="cap exceeded"
     )
 
     assert captured["url"] == "https://api.test.invalid/agents/audit"
     assert captured["json"] == {
-        "agent": "SAFETY",
+        "agent": "EXECUTOR",
         "action": "TOOL_CALL_REJECTED",
         "run_id": "run_1",
         "reason": "cap exceeded",
@@ -84,7 +84,7 @@ def test_base_url_trailing_slash_is_stripped(monkeypatch):
         lambda url, json, headers, timeout: captured.update(url=url) or FakeResponse({}),
     )
 
-    api_client.record_tool_call_audit(agent="SAFETY", action="TOOL_CALL_STARTED")
+    api_client.record_tool_call_audit(agent="EXECUTOR", action="TOOL_CALL_STARTED")
 
     assert captured["url"] == "https://api.test.invalid/agents/audit"
 
@@ -98,7 +98,7 @@ def test_http_error_propagates(monkeypatch):
 
     with pytest.raises(RuntimeError):
         api_client.write_agent_draft(
-            agent="SAFETY",
+            agent="EXECUTOR",
             target_type="SETTLEMENT_RUN",
             target_id="run_1",
             task_id="task_1",

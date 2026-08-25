@@ -4,9 +4,9 @@ import os
 
 import pytest
 
-# main.py가 모듈 임포트 시점에 safety.agent(LlmAgent 생성 — AGENT_MODEL 필요)를
-# 끌어온다. pytest는 fixture보다 먼저 테스트 모듈을 import하므로, 여기서 미리
-# 값을 심어둔다 — 아래 autouse fixture와 별개로 collection 단계에 필요하다.
+# main.py가 모듈 임포트 시점에 claimant/executor agent(LlmAgent 생성 — AGENT_MODEL
+# 필요)를 끌어온다. pytest는 fixture보다 먼저 테스트 모듈을 import하므로, 여기서
+# 미리 값을 심어둔다 — 아래 autouse fixture와 별개로 collection 단계에 필요하다.
 os.environ.setdefault("AGENT_MODEL", "gemini-test")
 os.environ.setdefault("OIDC_AUDIENCE", "https://agent.test.invalid")
 os.environ.setdefault("API_OIDC_AUDIENCE", "https://api.test.invalid")

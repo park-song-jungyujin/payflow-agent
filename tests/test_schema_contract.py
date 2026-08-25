@@ -11,12 +11,15 @@ from schemas.models import AgentDraft
 
 from claimant.tools import submit_receipt_review
 from executor.tools import submit_settlement_analysis
-from safety.tools import submit_risk_report
 
 
-def test_agent_name_enum_covers_all_three_agents():
-    """agent-tools.md — claimant/executor/safety 셋. before_tool_callback에 하드코딩된
-    이름이 백엔드 AgentName enum과 정확히 일치해야 /agents/drafts가 400을 안 낸다."""
+def test_agent_name_enum_covers_both_agents():
+    """agent-tools.md — claimant/executor 둘. before_tool_callback에 하드코딩된
+    이름이 백엔드 AgentName enum과 정확히 일치해야 /agents/drafts가 400을 안 낸다.
+
+    TODO: pyproject.toml의 payflow-backend pin이 SAFETY를 제거한 태그로 올라가면
+    {"CLAIMANT", "EXECUTOR"}로 좁힌다 — 지금 v0.3.0 pin은 아직 SAFETY를 갖고 있다
+    (payflow-backend는 이미 main에서 제거, 새 태그 컷 대기 중)."""
     assert {m.value for m in AgentName} == {"CLAIMANT", "EXECUTOR", "SAFETY"}
 
 
@@ -82,30 +85,6 @@ def test_executor_draft_call_validates_against_agent_draft_schema(monkeypatch):
         summary_text="매칭 실패 없음",
         anomalies_en=[],
         summary_text_en="No matching failures",
-    )
-    AgentDraft.model_validate(
-        {
-            "draft_id": f"drf_{call['task_id']}",
-            "agent": call["agent"],
-            "target_type": call["target_type"],
-            "target_id": call["target_id"],
-            "task_id": call["task_id"],
-            "payload": call["payload"],
-            "created_at": "2026-08-20T00:00:00Z",
-        }
-    )
-
-
-def test_safety_draft_call_validates_against_agent_draft_schema(monkeypatch):
-    import safety.tools as mod
-
-    call = _drafted_payload(
-        monkeypatch,
-        mod,
-        submit_risk_report,
-        settlement_run_id="run_1",
-        task_id="task_1",
-        risk_report="이상 없음",
     )
     AgentDraft.model_validate(
         {

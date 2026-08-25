@@ -24,7 +24,6 @@ from google.oauth2 import id_token  # noqa: E402
 from claimant.agent import root_agent as claimant_agent  # noqa: E402
 from claimant.receipt_text import ReceiptTextUnavailable, fetch_raw_text  # noqa: E402
 from executor.agent import root_agent as executor_agent  # noqa: E402
-from safety.agent import root_agent as safety_agent  # noqa: E402
 from shared.memory import (  # noqa: E402
     AgentType,
     Turn,
@@ -67,10 +66,8 @@ async def _run_once(agent, session_id: str, prompt: str) -> str:
     (session_id_for)으로 main.py가 직접 관리한다.
 
     마지막 텍스트 이벤트를 모아 돌려준다. 툴 호출 이벤트는 text가 없어 자연히
-    건너뛰므로, 툴을 부른 뒤 모델이 남긴 마무리 텍스트만 남는다. 안전 확인
-    에이전트는 이 반환값을 쓰지 않는다 — 결과가 이미 submit_risk_report 툴로
-    api에 써졌기 때문이다. 집행자 에이전트는 agent_sessions에 OUTPUT 턴으로
-    남기려고 이 값을 쓴다."""
+    건너뛰므로, 툴을 부른 뒤 모델이 남긴 마무리 텍스트만 남는다. 집행자
+    에이전트는 agent_sessions에 OUTPUT 턴으로 남기려고 이 값을 쓴다."""
     session_service = InMemorySessionService()
     await session_service.create_session(
         app_name=APP_NAME, user_id="system", session_id=session_id
@@ -106,28 +103,6 @@ def _render_prior_turns(turns: list[Turn], *, empty_message: str) -> str:
         else:
             rendered.append(f"[{t.role}] {t.content}")
     return "\n".join(rendered)
-
-
-@app.post("/agents/safety/report")
-async def safety_report(body: dict, authorization: str = Header(default="")):
-    _verify_oidc(authorization)
-
-    run_id = body.get("settlement_run_id")
-    task_id = body.get("task_id")
-    snapshot = body.get("settlement_run_snapshot")
-    if not run_id or not task_id:
-        raise HTTPException(status_code=400, detail="settlement_run_id, task_id required")
-
-    prompt = (
-        f"settlement_run_id: {run_id!r}\n"
-        f"task_id: {task_id!r}\n"
-        f"settlement_run 스냅샷:\n{snapshot}\n\n"
-        "위 내용을 검토해 리스크 리포트를 작성한 뒤, submit_risk_report 툴을 호출해 "
-        f"제출하세요. settlement_run_id에는 {run_id!r}을, task_id에는 {task_id!r}을 "
-        "그대로 넘기세요."
-    )
-    await _run_once(safety_agent, session_id=task_id, prompt=prompt)
-    return {"status": "ok"}
 
 
 @app.post("/agents/claimant/review")

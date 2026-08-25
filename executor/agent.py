@@ -5,8 +5,8 @@ run이 아직 없는 시점의 호출이라 entity_id=settlement_run_id(schema-c
 agent_sessions) 모델과 맞지 않아 별도로 설계해야 한다.
 
 정산 실행(settlement_run_id) 단위로 반복 호출될 수 있어 shared/memory.py
-(agent_sessions)로 세션을 이어간다 — safety_agent와 달리 InMemorySessionService
-만으로 끝나지 않는다. main.py가 호출 전후로 직접 agent_sessions에 턴을 기록한다.
+(agent_sessions)로 세션을 이어간다 — InMemorySessionService만으로는 끝나지
+않는다. main.py가 호출 전후로 직접 agent_sessions에 턴을 기록한다.
 """
 
 import os

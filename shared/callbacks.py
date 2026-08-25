@@ -21,7 +21,7 @@ _CALL_COUNTS_KEY = "before_tool_callback:call_counts"
 
 
 def make_before_tool_callback(agent_name: str):
-    """agent_name: schema-contract.md AgentName — CLAIMANT/EXECUTOR/SAFETY."""
+    """agent_name: schema-contract.md AgentName — CLAIMANT/EXECUTOR."""
 
     def before_tool_callback(tool: BaseTool, args: dict, tool_context: ToolContext):
         counts = tool_context.state.get(_CALL_COUNTS_KEY, {})

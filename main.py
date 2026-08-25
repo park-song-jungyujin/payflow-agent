@@ -29,8 +29,12 @@ from shared.memory import (  # noqa: E402
     AgentType,
     Turn,
     append_turn,
+    close_session,
+    extract_claimant_features,
+    extract_executor_features,
     find_prior_session_summary,
     find_similar_sessions,
+    format_case_features,
     get_or_create_session,
 )
 
@@ -59,7 +63,7 @@ def health():
     return {"status": "ok"}
 
 
-async def _run_once(agent, session_id: str, prompt: str) -> str:
+async def _run_once(agent, session_id: str, prompt: str, state: dict | None = None) -> str:
     """세션은 매 요청마다 새로 만든다 — architecture.md: ADK 세션은
     InMemorySessionService, 재시작 후 살아남을 필요가 없다.
 
@@ -74,7 +78,7 @@ async def _run_once(agent, session_id: str, prompt: str) -> str:
     남기려고 이 값을 쓴다."""
     session_service = InMemorySessionService()
     await session_service.create_session(
-        app_name=APP_NAME, user_id="system", session_id=session_id
+        app_name=APP_NAME, user_id="system", session_id=session_id, state=state or {}
     )
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
 
@@ -191,10 +195,12 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
             "parse_confidence",
         )
     }
-    untrusted_block = f"파싱 결과:\n{snapshot}\n\n영수증 원문:\n{raw_text}"
+    features = extract_claimant_features(snapshot)
+    session.case_features = features
+    query_text = format_case_features(AgentType.CLAIMANT, features)
     similar_summaries = (
         find_similar_sessions(
-            AgentType.CLAIMANT, org_id=org_id, query_text=untrusted_block, exclude_entity_id=receipt_id
+            AgentType.CLAIMANT, org_id=org_id, query_text=query_text, exclude_entity_id=receipt_id
         )
         if not session.turns
         else []
@@ -206,6 +212,7 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         if similar_summaries
         else ""
     )
+    untrusted_block = f"파싱 결과:\n{snapshot}\n\n영수증 원문:\n{raw_text}"
     session = append_turn(
         session,
         role="INPUT",
@@ -227,9 +234,12 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
         "위 파싱 결과를 검토한 뒤, submit_receipt_review 툴을 호출해 판정을 제출하세요. "
         f"receipt_id에는 {receipt_id!r}을, task_id에는 {task_id!r}을 그대로 넘기세요."
     )
-    final_text = await _run_once(claimant_agent, session_id=task_id, prompt=prompt)
+    final_text = await _run_once(
+        claimant_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
+    )
     if final_text:
         append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
+    close_session(session)
     return {"status": "ok"}
 
 
@@ -260,15 +270,16 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         session.turns, empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)"
     )
 
-    untrusted_block = (
-        f"candidate_claims:\n{candidate_claims}\n\n"
-        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}\n\n"
-        f"exact_duplicate_groups(영수증 고유번호가 완전일치해 코드가 이미 확신하는 "
-        f"중복 클러스터):\n{exact_duplicate_groups}"
+    features = extract_executor_features(
+        candidate_claims=candidate_claims,
+        duplicate_groups=duplicate_groups,
+        exact_duplicate_groups=exact_duplicate_groups,
     )
+    session.case_features = features
+    query_text = format_case_features(AgentType.EXECUTOR, features)
     similar_summaries = (
         find_similar_sessions(
-            AgentType.EXECUTOR, org_id=org_id, query_text=untrusted_block, exclude_entity_id=run_id
+            AgentType.EXECUTOR, org_id=org_id, query_text=query_text, exclude_entity_id=run_id
         )
         if not session.turns
         else []
@@ -279,6 +290,12 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         + "\n\n"
         if similar_summaries
         else ""
+    )
+    untrusted_block = (
+        f"candidate_claims:\n{candidate_claims}\n\n"
+        f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{duplicate_groups}\n\n"
+        f"exact_duplicate_groups(영수증 고유번호가 완전일치해 코드가 이미 확신하는 "
+        f"중복 클러스터):\n{exact_duplicate_groups}"
     )
     session = append_turn(
         session,
@@ -301,7 +318,10 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         f"호출해 제출하세요. settlement_run_id에는 {run_id!r}을, task_id에는 {task_id!r}을 "
         "그대로 넘기세요."
     )
-    final_text = await _run_once(executor_agent, session_id=task_id, prompt=prompt)
+    final_text = await _run_once(
+        executor_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
+    )
     if final_text:
         append_turn(session, role="OUTPUT", content=final_text, untrusted=False)
+    close_session(session)
     return {"status": "ok"}

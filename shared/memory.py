@@ -57,6 +57,104 @@ class AgentType(str, Enum):
     EXECUTOR = "EXECUTOR"
 
 
+CATEGORY_DISPLAY: dict[str, str] = {
+    "PAYMENT_FEE": "지급수수료",
+    "EMPLOYEE_BENEFIT": "복리후생비",
+    "TRAVEL": "여비교통비",
+    "SUPPLIES": "소모품비",
+    "ADVERTISING": "광고선전비",
+    "RENT": "지급임차료",
+    "UNCLASSIFIED": "미분류",
+}
+
+
+def extract_claimant_features(snapshot: dict) -> dict:
+    """영수증 파싱 스냅샷에서 결정론적 사건 특징을 추출한다. 금액 숫자는 절대 포함하지 않는다."""
+    merchant = snapshot.get("merchant_name") or ""
+    cat_code = snapshot.get("account_category_code") or "UNCLASSIFIED"
+    cat_display = CATEGORY_DISPLAY.get(cat_code, cat_code)
+    currency = snapshot.get("currency") or ""
+    anomalies = []
+    if snapshot.get("parsed_amount_minor") is None:
+        anomalies.append("금액 미기재")
+    if not snapshot.get("transaction_date"):
+        anomalies.append("거래일자 미기재")
+    conf = snapshot.get("parse_confidence")
+    if conf is not None and conf < 0.7:
+        anomalies.append("저신뢰도 파싱")
+    if cat_code == "UNCLASSIFIED":
+        anomalies.append("미분류 계정과목")
+    if not anomalies:
+        anomalies.append("정상 파싱")
+    return {
+        "merchant_name": merchant,
+        "category": cat_display,
+        "currency": currency,
+        "anomalies": anomalies,
+    }
+
+
+def extract_executor_features(
+    candidate_claims: list[dict],
+    duplicate_groups: list[dict] | None = None,
+    exact_duplicate_groups: list[dict] | None = None,
+) -> dict:
+    """후보 claim 목록 및 중복 그룹에서 결정론적 사건 특징을 추출한다. 금액 숫자는 절대 포함하지 않는다."""
+    merchants = sorted(
+        {c["merchant_name"] for c in candidate_claims if c.get("merchant_name")}
+    )
+    categories = sorted(
+        {
+            CATEGORY_DISPLAY.get(
+                c.get("account_category_code", ""), c.get("account_category_code", "")
+            )
+            for c in candidate_claims
+            if c.get("account_category_code")
+        }
+    )
+    currencies = sorted({c["currency"] for c in candidate_claims if c.get("currency")})
+    anomalies = []
+    if exact_duplicate_groups:
+        anomalies.append("영수증 고유번호 중복")
+    if duplicate_groups:
+        anomalies.append("중복 청구 의심")
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    if any(c.get("transaction_date") and c["transaction_date"] > today_iso for c in candidate_claims):
+        anomalies.append("미래 거래일")
+    if len(currencies) > 1:
+        anomalies.append("다중 통화 혼재")
+    if not anomalies:
+        anomalies.append("이상 없음")
+    return {
+        "merchants": merchants,
+        "categories": categories,
+        "currencies": currencies,
+        "anomalies": anomalies,
+    }
+
+
+def format_case_features(agent_type: AgentType, features: dict) -> str:
+    """사건 특징을 요약 및 벡터 검색 쿼리에서 공유할 표준 포맷 문자열로 변환한다."""
+    parts = []
+    if agent_type == AgentType.CLAIMANT:
+        if features.get("merchant_name"):
+            parts.append(f"가맹점: {features['merchant_name']}")
+        if features.get("category"):
+            parts.append(f"카테고리: {features['category']}")
+        if features.get("anomalies"):
+            anom_str = ", ".join(features["anomalies"])
+            parts.append(f"이상유형: {anom_str}")
+    elif agent_type == AgentType.EXECUTOR:
+        if features.get("merchants"):
+            parts.append(f"가맹점: {', '.join(features['merchants'])}")
+        if features.get("categories"):
+            parts.append(f"카테고리: {', '.join(features['categories'])}")
+        if features.get("anomalies"):
+            anom_str = ", ".join(features["anomalies"])
+            parts.append(f"이상유형: {anom_str}")
+    return ", ".join(parts)
+
+
 class Turn(BaseModel):
     turn_id: str
     ts: datetime
@@ -74,6 +172,7 @@ class AgentSession(BaseModel):
     actor_ref: str | None = None
     status: str = "ACTIVE"  # "ACTIVE" | "CLOSED"
     turns: list[Turn] = []
+    case_features: dict = {}
     summary: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -138,15 +237,22 @@ def append_turn(
 
 def close_session(session: AgentSession) -> AgentSession:
     """세션을 CLOSED로 전환하고 결정론적 요약을 생성한다. 요약은 LLM이 아니라
-    코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수와
-    관련 문서 ID만 남긴다. 요약 임베딩은 있으면 같이 저장하고, 실패해도
-    세션 종료는 계속 진행한다."""
+    코드가 만든다(§2 "요약은 코드가 만든다") — 금액은 절대 넣지 않고 턴 수,
+    코드 추출 사건 특징, 관련 문서 ID만 남긴다. 요약 임베딩은 있으면 같이
+    저장하고, 실패해도 세션 종료는 계속 진행한다."""
     doc_refs = sorted({ref for turn in session.turns for ref in turn.doc_refs})
-    session.summary = (
-        f"{len(session.turns)}턴, 관련 문서 {doc_refs}, 상태 CLOSED"
-        if doc_refs
-        else f"{len(session.turns)}턴, 상태 CLOSED"
-    )
+    features_str = ""
+    if session.case_features:
+        features_str = format_case_features(session.agent_type, session.case_features)
+
+    summary_parts = [f"{len(session.turns)}턴"]
+    if features_str:
+        summary_parts.append(features_str)
+    if doc_refs:
+        summary_parts.append(f"관련 문서 {doc_refs}")
+    summary_parts.append("상태 CLOSED")
+
+    session.summary = ", ".join(summary_parts)
     session.status = "CLOSED"
     session.updated_at = datetime.now(timezone.utc)
     data = session.model_dump(mode="json")

@@ -41,7 +41,19 @@ _BODY = {
 
 
 class _FakeSession:
-    turns = []
+    def __init__(self, turns=None):
+        self.turns = turns or []
+        self.session_id = "CLAIMANT__rct_1"
+        self.agent_type = AgentType.CLAIMANT
+        self.org_id = "org_1"
+        self.status = "ACTIVE"
+        self.case_features = {}
+        self.summary = None
+
+
+@pytest.fixture(autouse=True)
+def _stub_close_session_by_default(monkeypatch):
+    monkeypatch.setattr(main, "close_session", lambda session: session)
 
 
 def test_missing_fields_rejected(client, oidc_ok):
@@ -49,6 +61,7 @@ def test_missing_fields_rejected(client, oidc_ok):
         "/agents/claimant/review", json={}, headers={"Authorization": "Bearer x"}
     )
     assert resp.status_code == 400
+
 
 
 def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
@@ -65,6 +78,7 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
 
     sessions_fetched = []
     turns_appended = []
+    closed_sessions = []
     monkeypatch.setattr(
         main,
         "get_or_create_session",
@@ -76,6 +90,9 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     monkeypatch.setattr(
         main, "append_turn", lambda session, **kw: turns_appended.append(kw) or session
     )
+    monkeypatch.setattr(
+        main, "close_session", lambda session: closed_sessions.append(session) or session
+    )
     monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
     similar_calls = []
     monkeypatch.setattr(
@@ -85,12 +102,14 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
     )
 
     prompts = []
+    states = []
 
     class _FakeToolContext:
         state = {}
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, state=None):
         prompts.append(prompt)
+        states.append(state)
         gate = make_before_tool_callback("CLAIMANT")(
             tool=type("T", (), {"name": "submit_receipt_review"})(),
             args={},
@@ -167,7 +186,7 @@ def test_unreadable_raw_text_does_not_block_the_review(client, oidc_ok, monkeypa
 
     prompts = []
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         prompts.append(prompt)
         return ""
 
@@ -189,7 +208,7 @@ def test_no_raw_text_uri_is_not_an_error(client, oidc_ok, monkeypatch):
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
     monkeypatch.setattr(main, "find_prior_session_summary", lambda *a, **kw: None)
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return ""
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
@@ -223,7 +242,7 @@ def test_new_session_injects_prior_session_summary(client, oidc_ok, monkeypatch)
 
     prompts = []
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         prompts.append(prompt)
         return ""
 
@@ -266,7 +285,7 @@ def test_continuing_session_skips_prior_session_summary_lookup(client, oidc_ok, 
         main, "find_prior_session_summary", lambda *a, **kw: summary_calls.append(1)
     )
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return ""
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
@@ -307,7 +326,7 @@ def test_continuing_session_skips_similar_sessions_lookup(client, oidc_ok, monke
         main, "find_similar_sessions", lambda *a, **kw: similar_calls.append(1)
     )
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return ""
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)

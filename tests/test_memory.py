@@ -401,3 +401,239 @@ def test_find_similar_sessions_returns_empty_when_firestore_query_fails(fake, mo
     )
 
     assert result == []
+
+
+# --- 사건 특징 추출 및 의미 공간 일치화 (PR #10 피드백) --------------------------
+
+
+def test_extract_claimant_features_pulls_merchant_category_and_anomalies():
+    snapshot = {
+        "merchant_name": "스타벅스",
+        "account_category_code": "EMPLOYEE_BENEFIT",
+        "currency": "KRW",
+        "parsed_amount_minor": 50000,
+        "transaction_date": "2026-08-25",
+        "parse_confidence": 0.9,
+    }
+
+    features = memory.extract_claimant_features(snapshot)
+
+    assert features["merchant_name"] == "스타벅스"
+    assert features["category"] == "복리후생비"
+    assert features["currency"] == "KRW"
+    assert features["anomalies"] == ["정상 파싱"]
+
+
+def test_extract_claimant_features_flags_anomalies_without_amounts():
+    snapshot = {
+        "merchant_name": "",
+        "account_category_code": "UNCLASSIFIED",
+        "currency": "",
+        "parsed_amount_minor": None,
+        "transaction_date": "",
+        "parse_confidence": 0.3,
+    }
+
+    features = memory.extract_claimant_features(snapshot)
+
+    assert features["merchant_name"] == ""
+    assert features["category"] == "미분류"
+    assert "금액 미기재" in features["anomalies"]
+    assert "거래일자 미기재" in features["anomalies"]
+    assert "저신뢰도 파싱" in features["anomalies"]
+    assert "미분류 계정과목" in features["anomalies"]
+
+
+def test_extract_executor_features_aggregates_merchants_categories_and_anomalies():
+    candidate_claims = [
+        {
+            "merchant_name": "스타벅스",
+            "account_category_code": "EMPLOYEE_BENEFIT",
+            "currency": "KRW",
+            "transaction_date": "2026-08-25",
+        },
+        {
+            "merchant_name": "카페베네",
+            "account_category_code": "SUPPLIES",
+            "currency": "KRW",
+            "transaction_date": "2026-09-10",  # 미래 거래일
+        },
+    ]
+
+    features = memory.extract_executor_features(
+        candidate_claims,
+        duplicate_groups=[{"claim_ids": ["a", "b"]}],
+        exact_duplicate_groups=[{"claim_ids": ["c", "d"]}],
+    )
+
+    assert features["merchants"] == ["스타벅스", "카페베네"]
+    assert features["categories"] == ["복리후생비", "소모품비"]  # sorted() 가나다순
+    assert features["currencies"] == ["KRW"]
+    assert "영수증 고유번호 중복" in features["anomalies"]
+    assert "중복 청구 의심" in features["anomalies"]
+    assert "미래 거래일" in features["anomalies"]
+    # 다중 통화 혼재는 아님
+    assert "다중 통화 혼재" not in features["anomalies"]
+
+
+def test_extract_executor_features_flags_multi_currency_and_no_anomaly_baseline():
+    candidate_claims = [
+        {"merchant_name": "A", "account_category_code": "TRAVEL", "currency": "KRW", "transaction_date": "2026-08-25"},
+        {"merchant_name": "B", "account_category_code": "TRAVEL", "currency": "USD", "transaction_date": "2026-08-25"},
+    ]
+
+    features = memory.extract_executor_features(candidate_claims)
+
+    assert "다중 통화 혼재" in features["anomalies"]
+    # 아무 이상도 없으면 baseline 문구로 대체 — 빈 리스트가 되면 안 된다
+    clean = memory.extract_executor_features(
+        [{"merchant_name": "A", "account_category_code": "TRAVEL", "currency": "KRW", "transaction_date": "2026-08-25"}]
+    )
+    assert clean["anomalies"] == ["이상 없음"]
+
+
+def test_format_case_features_uses_same_template_for_claimant_query_and_summary():
+    """과거 사건 요약(close_session)과 현재 사건 검색 쿼리가 동일한 포맷터를
+    거치므로 같은 의미 공간 텍스트가 된다."""
+    features = {
+        "merchant_name": "스타벅스",
+        "category": "복리후생비",
+        "anomalies": ["저신뢰도 파싱"],
+    }
+
+    summary_text = memory.format_case_features(memory.AgentType.CLAIMANT, features)
+    query_text = memory.format_case_features(memory.AgentType.CLAIMANT, features)
+
+    assert summary_text == query_text
+    assert "가맹점: 스타벅스" in summary_text
+    assert "카테고리: 복리후생비" in summary_text
+    assert "이상유형: 저신뢰도 파싱" in summary_text
+
+
+def test_format_case_features_executor_joins_multi_merchants():
+    features = {
+        "merchants": ["스타벅스", "카페베네"],
+        "categories": ["소모품비", "복리후생비"],
+        "anomalies": ["미래 거래일", "영수증 고유번호 중복"],
+    }
+
+    text = memory.format_case_features(memory.AgentType.EXECUTOR, features)
+
+    assert "가맹점: 스타벅스, 카페베네" in text
+    assert "카테고리: 소모품비, 복리후생비" in text
+    assert "이상유형: 미래 거래일, 영수증 고유번호 중복" in text
+
+
+def test_close_session_summary_includes_case_features_when_present(fake):
+    """close_session이 case_features를 포함해 요약을 만든다 — 과거 사건 임베딩이
+    'N턴, 관련 문서 [...]' 대신 사건 특징 텍스트를 담게 된다."""
+    session = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1"
+    )
+    session.case_features = {
+        "merchant_name": "스타벅스",
+        "category": "복리후생비",
+        "anomalies": ["정상 파싱"],
+    }
+    memory.append_turn(session, role="OUTPUT", content="검토 완료", doc_refs=["rct_1"])
+
+    closed = memory.close_session(session)
+
+    assert "가맹점: 스타벅스" in closed.summary
+    assert "카테고리: 복리후생비" in closed.summary
+    assert "관련 문서" in closed.summary  # doc_refs도 여전히 남는다
+    assert "상태 CLOSED" in closed.summary
+
+
+def test_close_session_summary_never_leaks_amounts_even_with_features(fake):
+    """money-safety.md — case_features에 금액을 넣지 않는 한 요약에 금액이
+    새어나가면 안 된다. 턴 content에 숫자가 있어도 summary는 코드가 만들므로
+    그 숫자가 들어가지 않는다."""
+    session = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_req_1", org_id="org_1"
+    )
+    session.case_features = {
+        "merchant_name": "스타벅스",
+        "category": "복리후생비",
+        "anomalies": ["정상 파싱"],
+    }
+    memory.append_turn(session, role="OUTPUT", content="12,345원 지급 예정")
+
+    closed = memory.close_session(session)
+
+    assert "12,345" not in closed.summary
+
+
+def test_close_session_summary_falls_back_to_legacy_format_without_case_features(fake):
+    """case_features가 없으면 기존 포맷으로 안전하게 폴백한다 — 기존 세션/기존 테스트 호환."""
+    session = memory.get_or_create_session(memory.AgentType.EXECUTOR, "run_1")
+    memory.append_turn(session, role="OUTPUT", content="분석", doc_refs=["rct_1"])
+
+    closed = memory.close_session(session)
+
+    assert "가맹점:" not in closed.summary
+    assert "카테고리:" not in closed.summary
+    assert "rct_1" in closed.summary
+
+
+def test_find_similar_sessions_surfaces_same_feature_space_past_case(fake, monkeypatch):
+    """과거 사건 요약(close_session이 case_features 기반으로 생성)과 현재 쿼리가
+    같은 format_case_features 포맷터를 거치면, 같은 의미 공간에서 cosine
+    similarity 랭킹이 성립한다. 서로 다른 특징의 과거 사건보다 같은 특징의
+    과거 사건이 먼저 랭크되어야 한다."""
+    # 임베딩 텍스트에 특징 키워드가 들어가면 그 키워드 방향 벡터를 준다.
+    # "스타벅스"가 들어간 텍스트는 [1, 0], "편의점"이 들어간 텍스트는 [0, 1],
+    # 둘 다 아니면(기타) [0, 0].
+    def fake_embed(text):
+        if "스타벅스" in text:
+            return [1.0, 0.0]
+        if "편의점" in text:
+            return [0.0, 1.0]
+        return [0.0, 0.0]
+
+    monkeypatch.setattr(memory, "_embed_text", fake_embed)
+
+    # 과거 사건 1: 스타벅스 — 현재 사건과 같은 특징 공간
+    past_star = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_past_star", org_id="org_1"
+    )
+    past_star.case_features = {
+        "merchant_name": "스타벅스",
+        "category": "복리후생비",
+        "anomalies": ["정상 파싱"],
+    }
+    memory.append_turn(past_star, role="OUTPUT", content="과거 스타벅스 사건")
+    memory.close_session(past_star)
+
+    # 과거 사건 2: 편의점 — 다른 특징 공간
+    past_conv = memory.get_or_create_session(
+        memory.AgentType.CLAIMANT, "clm_past_conv", org_id="org_1"
+    )
+    past_conv.case_features = {
+        "merchant_name": "편의점",
+        "category": "소모품비",
+        "anomalies": ["정상 파싱"],
+    }
+    memory.append_turn(past_conv, role="OUTPUT", content="과거 편의점 사건")
+    memory.close_session(past_conv)
+
+    # 현재 사건: 스타벅스 — 같은 특징 공간의 과거 사건이 먼저 와야 한다
+    query_features = {
+        "merchant_name": "스타벅스",
+        "category": "복리후생비",
+        "anomalies": ["정상 파싱"],
+    }
+    query_text = memory.format_case_features(memory.AgentType.CLAIMANT, query_features)
+
+    results = memory.find_similar_sessions(
+        memory.AgentType.CLAIMANT,
+        org_id="org_1",
+        query_text=query_text,
+        exclude_entity_id="clm_new",
+        limit=2,
+    )
+
+    assert len(results) == 2
+    # 스타벅스 과거 사건 요약이 첫 번째(코사인 1.0), 편의점은 0.0
+    assert "스타벅스" in results[0]
+    assert "편의점" in results[1]

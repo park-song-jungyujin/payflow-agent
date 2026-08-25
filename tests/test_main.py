@@ -56,6 +56,11 @@ def client():
     return TestClient(main.app)
 
 
+@pytest.fixture(autouse=True)
+def _stub_close_session_by_default(monkeypatch):
+    monkeypatch.setattr(main, "close_session", lambda session: session)
+
+
 def test_health():
     client = TestClient(main.app)
     resp = client.get("/")
@@ -106,7 +111,7 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
     class _FakeSession:
         turns = []
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return ""
 
     monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
@@ -135,7 +140,7 @@ def test_executor_analyze_passes_org_id_to_session(client, monkeypatch):
         org_ids_seen.append(org_id)
         return _FakeSession()
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return ""
 
     monkeypatch.setattr(main, "get_or_create_session", fake_get_or_create_session)
@@ -259,20 +264,28 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     monkeypatch.setattr(main, "append_turn", fake_append_turn)
 
     prompts = []
+    states = []
+    closed_sessions = []
     similar_calls = []
     monkeypatch.setattr(
         main,
         "find_similar_sessions",
         lambda *a, **kw: similar_calls.append((a, kw)) or ["과거 유사 사례: 3턴, 상태 CLOSED"],
     )
+    monkeypatch.setattr(
+        main,
+        "close_session",
+        lambda session: closed_sessions.append(session) or session,
+    )
 
     class _FakeToolContext:
         state = {}
 
-    async def fake_run_once(agent, session_id, prompt):
+    async def fake_run_once(agent, session_id, prompt, state=None):
         """실제 LlmAgent/Runner/Gemini 대신, 에이전트가 이상징후를 서술하고
         정해진 프로토콜대로 툴을 한 번 호출했다고 가정한 결과를 재현한다."""
         prompts.append(prompt)
+        states.append(state)
         before_tool_callback = make_before_tool_callback("EXECUTOR")
         gate_result = before_tool_callback(
             tool=type("T", (), {"name": "submit_settlement_analysis"})(),

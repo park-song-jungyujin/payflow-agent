@@ -57,8 +57,6 @@ def submit_settlement_analysis(
     task_id: str,
     anomalies: list[str],
     summary_text: str,
-    anomalies_en: list[str],
-    summary_text_en: str,
 ) -> dict:
     """분석 결과를 api에 기록한다. 분석이 끝나면 반드시 한 번 호출한다.
 
@@ -66,14 +64,12 @@ def submit_settlement_analysis(
     task_id: 프롬프트에 주어진 멱등키. 같은 task_id로 다시 호출하면 이전 기록을 덮어쓴다.
     anomalies: 이상징후 서술 목록(한국어). 하나도 없으면 빈 리스트 — 그 자체로 정상 결과다.
     summary_text: 사람 승인자가 읽을 한국어 종합 요약. 빈 문자열이면 거부된다.
-    anomalies_en: anomalies와 같은 개수·같은 순서의 영어 번역. web이 언어 설정에
-        따라 골라 보여준다(anomalies가 비면 이것도 빈 리스트).
-    summary_text_en: summary_text의 영어 번역. 빈 문자열이면 거부된다.
+
+    영어 번역(anomalies_en·summary_text_en)은 여기서 안 만든다 — api가 draft를
+    받는 시점에 Gemma로 번역해 채운다(api/src/guards/agent_drafts.py).
     """
-    if not summary_text.strip() or not summary_text_en.strip():
-        return {"status": "error", "detail": "summary_text/summary_text_en must not be empty"}
-    if len(anomalies) != len(anomalies_en):
-        return {"status": "error", "detail": "anomalies and anomalies_en must have the same length"}
+    if not summary_text.strip():
+        return {"status": "error", "detail": "summary_text must not be empty"}
 
     result = write_agent_draft(
         agent="EXECUTOR",
@@ -83,8 +79,6 @@ def submit_settlement_analysis(
         payload={
             "anomalies": anomalies,
             "summary_text": summary_text,
-            "anomalies_en": anomalies_en,
-            "summary_text_en": summary_text_en,
         },
     )
     return {"status": "ok", "draft_id": result.get("draft_id")}

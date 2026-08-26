@@ -308,6 +308,7 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     candidate_claims = body.get("candidate_claims")
     duplicate_groups = body.get("duplicate_groups") or []
     exact_duplicate_groups = body.get("exact_duplicate_groups") or []
+    future_dated_claims = body.get("future_dated_claims") or []
     org_id = body.get("org_id")
     force_reanalyze = bool(body.get("force_reanalyze"))
     if not run_id or not task_id or candidate_claims is None:
@@ -378,7 +379,9 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         f"candidate_claims:\n{_dumps(candidate_claims)}\n\n"
         f"duplicate_groups(코드가 이미 확신하는 중복 클러스터):\n{_dumps(duplicate_groups)}\n\n"
         f"exact_duplicate_groups(영수증 고유번호가 완전일치해 코드가 이미 확신하는 "
-        f"중복 클러스터):\n{_dumps(exact_duplicate_groups)}"
+        f"중복 클러스터):\n{_dumps(exact_duplicate_groups)}\n\n"
+        f"future_dated_claims(코드가 서버 시계 기준으로 이미 판정한 미래 거래일 "
+        f"claim 목록):\n{_dumps(future_dated_claims)}"
     )
     session = await asyncio.to_thread(
         append_turn,

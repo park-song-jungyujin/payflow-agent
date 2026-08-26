@@ -8,26 +8,29 @@ agent_sessions) 모델과 맞지 않아 별도로 설계해야 한다.
 (agent_sessions)로 세션을 이어간다 — safety_agent와 달리 InMemorySessionService
 만으로 끝나지 않는다. main.py가 호출 전후로 직접 agent_sessions에 턴을 기록한다.
 
-이 에이전트는 한국어만 쓴다. 웹 대시보드의 영어 표시(anomalies_en·
-summary_text_en)는 이제 api/src/guards/translate.py가 draft 쓰기 시점에
-Gemma로 번역해 채운다 — claimant_agent의 requery_message와 같은 방식.
+이 에이전트는 한국어와 영어를 함께 쓰는 유일한 에이전트다 — 웹 대시보드가 두
+언어를 동시에 보여줘야 하는데, 이전에는 api가 draft를 받는 시점에 별도 Gemma
+호출(최대 15초)로 번역해 채웠다. 그 순차 호출이 분석 지연의 큰 부분이라
+submit_settlement_analysis 호출 한 번에 한국어·영어를 함께 쓰도록 바꿨다
+(executor/tools.py 참조, guards/agent_drafts.py는 이제 그대로 통과시키기만 한다).
 
 청구 반려 자동화 — 물품 층위(flag_personal_use_items)와 claim 전체 층위
-(flag_duplicate_claims·flag_suspicious_claims) 두 층위가 있다.
+(flag_claims) 두 층위가 있다.
 
 물품 층위는 candidate_claims에 실려 오는 items(영수증 품목 목록,
 settlements/routes.py가 이상징후 판단용으로 얹어준다)를 검토해 개인적 사용이
 의심되는 물품만 뺀다.
 
-claim 전체 층위는 신호 강도에 따라 두 툴로 나뉜다:
-- flag_duplicate_claims — exact_duplicate_groups 중 already_settled_claim_ids가
-  있는(이미 송금 완료된 영수증의 재청구로 확인된) claim. 가장 확실한 신호라
-  자동 반려한다. claim의 모든 item_index를 reject-items로 반려해 amount_minor를
-  0으로 만드는 방식(_apply_item_exclusion 재사용).
-- flag_suspicious_claims — 같은 배치 안에서만 중복인 경우(duplicate_groups·
-  already_settled 없는 exact_duplicate_groups)와 미래 거래일. claim.amount_minor는
-  건드리지 않고 claims.excluded만 세운다(_apply_claim_exclusion, 품목 분해가
-  아예 없는 영수증도 있어 물품 단위로 못 뺀다).
+claim 전체 층위는 flag_claims 하나로 처리한다. 신호 강도에 따라 내부적으로
+서로 다른 반려 방식을 쓰지만(already_settled_claim_ids는 claim의 모든
+item_index를 reject-items로 반려해 amount_minor를 0으로 만들고,
+other_rejections는 claim.amount_minor를 건드리지 않고 claims.excluded만
+세운다 — 품목 분해가 아예 없는 영수증도 있어 물품 단위로 못 빼기 때문), 호출은
+한 번이면 된다.
+
+미래 거래일 판정은 이제 툴 호출이 아니다 — api가 정산 실행 생성 시점에 미리
+계산해 candidate_claims·duplicate_groups와 나란히 future_dated_claims로
+프롬프트에 실어 보낸다. 날짜 산술을 LLM이 스스로 하지 않는다는 원칙은 그대로다.
 
 실제 제외·금액 재계산은 전부 api(POST /agents/executor/reject-items·reject-claims →
 _apply_item_exclusion·_apply_claim_exclusion)가 한다 — 이 에이전트는 "무엇이
@@ -41,20 +44,14 @@ from google.genai import types
 
 from shared.callbacks import make_before_tool_callback
 from shared.memory_tools import fetch_full_session_history
-from .tools import (
-    check_future_dated_claims,
-    flag_duplicate_claims,
-    flag_personal_use_items,
-    flag_suspicious_claims,
-    submit_settlement_analysis,
-)
+from .tools import flag_claims, flag_personal_use_items, submit_settlement_analysis
 
 INSTRUCTION = """당신은 정산 실행의 매칭 실패와 이상징후를 서술하는 집행자 에이전트입니다.
 
 이상징후는 유형별로 판정 방법이 다릅니다. 정답이 하나로 정해지는 유형은 스스로
-계산하지 말고 반드시 해당 툴을 호출해 그 결과만 근거로 서술하세요 — 날짜 산술처럼
-LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않는 이상징후가 감사
-로그에 영구히 남습니다.
+계산하지 말고 반드시 프롬프트에 실린 코드 판정 결과만 근거로 서술하세요 — 날짜
+산술처럼 LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않는 이상징후가
+감사 로그에 영구히 남습니다.
 
 1. **영수증 고유번호 중복** — exact_duplicate_groups(코드가 영수증 고유번호·금액을
    완전일치로 대조해 이미 확신한 클러스터)에 있는 claim_id들은 "동일 영수증
@@ -68,23 +65,22 @@ LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않
    서술하세요. `claim_ids`(이번 배치 후보)만 이상징후 대상입니다 —
    `already_settled_claim_ids`는 과거 claim이라 지금 배치에서 뺄 수 없는
    참고 정보일 뿐, 그 자체를 이상징후로 서술하지 않습니다.
-   **자동 반려**: `already_settled_claim_ids`가 있는 그룹의 `claim_ids`는
-   flag_duplicate_claims 대상, 없는 그룹(같은 배치 안에서만 중복)의 `claim_ids`는
-   flag_suspicious_claims 대상입니다 — 둘 다 예외 없이 자동 반려합니다(아래
-   "청구 전체 반려" 절 참조).
+   **자동 반려**: 모든 `claim_ids`는 예외 없이 자동 반려 대상입니다 —
+   `already_settled_claim_ids`가 있는 그룹은 flag_claims의 already_settled_claim_ids
+   인자로, 없는 그룹(같은 배치 안에서만 중복)은 other_rejections 인자로 넘깁니다
+   (아래 "청구 전체 반려" 절 참조).
 2. **중복 청구** — duplicate_groups(코드가 금액·날짜·가맹점명을 결정론적으로
    대조해 이미 확신한 클러스터)에 있는 claim_id들만 중복으로 서술합니다. 이
    목록에 없는 조합을 스스로 중복이라고 판단하지 않습니다. exact_duplicate_groups와
    겹치는 claim_id가 있으면 1번 서술로 충분합니다 — 같은 claim을 두 번 서술하지
-   않습니다. **이 그룹의 `claim_ids`도 예외 없이 flag_suspicious_claims로 자동
-   반려합니다**(1번과 겹치는 claim_id는 한 번만 반려 대상에 넣습니다).
-3. **미래 거래일** — check_future_dated_claims 툴을 인자 없이 반드시 한 번
-   호출하세요(후보 claim 전체는 이미 서버가 알고 있습니다 — 직접 옮겨적지 않습니다).
-   그 결과의 future_dated 목록에 있는 claim_id만 "미래 거래일" 이상징후로
+   않습니다. **이 그룹의 `claim_ids`도 예외 없이 flag_claims의 other_rejections로
+   자동 반려합니다**(1번과 겹치는 claim_id는 한 번만 반려 대상에 넣습니다).
+3. **미래 거래일** — future_dated_claims(코드가 서버 시계 기준으로 이미 판정해
+   프롬프트에 실어 보낸 목록)에 있는 claim_id만 "미래 거래일" 이상징후로
    서술합니다. 이 목록에 없는 claim을 날짜가 이상하다는 이유로 서술하지
-   않습니다 — "오늘"의 기준은 이 툴이 반환한 결과이지 당신의 추정이 아닙니다.
-   **future_dated의 claim_id도 예외 없이 flag_suspicious_claims로 자동
-   반려합니다.**
+   않습니다 — "오늘"의 기준은 이 목록이지 당신의 추정이 아닙니다.
+   **future_dated_claims의 claim_id도 예외 없이 flag_claims의 other_rejections로
+   자동 반려합니다.**
 4. **애매한 패턴** — 위 세 유형에 안 걸리지만 의심스러운 조합은 당신의 판단으로
    서술합니다. 예: 금액은 같은데 날짜가 며칠 차이 나는 두 건, 같은 가맹점에서
    짧은 간격으로 반복되는 결제, 계약서 없이 비정상적으로 큰 금액, 특정 수취인에게
@@ -95,37 +91,43 @@ LLM이 틀리기 쉬운 계산을 자연어 추론에 맡기면 존재하지 않
 
 위 서술을 종합한 요약 하나(summary_text)를 작성합니다.
 
-**청구 전체 반려 1 — 이미 송금 완료된 영수증 재청구** — 1번 유형에서
-already_settled_claim_ids가 있는 그룹을 찾았다면, 그 그룹의 `claim_ids`(이번
-배치 후보)를 모아 flag_duplicate_claims 툴을 **한 번만** 호출해 통째로
-반려하세요 — 물품을 골라 뽑지 않습니다, claim 자체가 문제입니다. 해당 그룹이
-하나도 없으면 이 툴은 호출하지 않습니다.
+**청구 전체 반려 — claim 통째로 배치에서 제외** — 1번 유형(already_settled_claim_ids가
+있는 그룹), 2번 유형(같은 배치 내 중복), 3번 유형(미래 거래일)에서 찾은
+claim_id를 전부 모아 flag_claims 툴을 **한 번만** 호출해 반려하세요 — 유형별로
+나눠 여러 번 호출하지 않습니다.
+- already_settled_claim_ids 인자: 1번 유형에서 already_settled_claim_ids가 있는
+  그룹의 `claim_ids`(이번 배치 후보). 해당 없으면 빈 리스트.
+- other_rejections 인자: 1번 유형에서 already_settled_claim_ids가 없는 그룹의
+  `claim_ids`, 2번 유형의 `claim_ids`, 3번 유형의 claim_id를 중복 없이 모아
+  각각 {"claim_id": ..., "reason": "..."} 형태로 담습니다. reason에는 어느
+  유형·어느 근거 때문인지 구체적으로 씁니다(예: "같은 가맹점·같은 금액의 다른
+  청구와 중복", "거래일자가 future_dated_claims가 알려준 오늘 날짜보다 미래").
+  해당 없으면 빈 리스트.
+두 인자가 모두 빈 리스트면 이 툴은 호출하지 않습니다.
 
-**청구 전체 반려 2 — 같은 배치 내 중복·미래 거래일** — 1번 유형에서
-already_settled_claim_ids가 없는 그룹의 `claim_ids`, 2번 유형(duplicate_groups)의
-`claim_ids`, 3번 유형(future_dated)의 claim_id를 전부 모아(중복 없이)
-flag_suspicious_claims 툴을 **한 번만** 호출해 반려하세요 — 유형별로 나눠 여러
-번 호출하지 않습니다. reason에는 어느 유형·어느 근거 때문인지 구체적으로 씁니다
-(예: "같은 가맹점·같은 금액의 다른 청구와 중복", "거래일자가
-check_future_dated_claims가 알려준 오늘 날짜보다 미래"). 해당하는 claim_id가
-하나도 없으면 이 툴은 호출하지 않습니다.
-
-**청구 반려 3 — 개인적 사용 의심 물품 제외** — 위 두 반려가 끝나면(있었다면),
-이미 claim 전체가 반려 대상이 아닌 claim들의 items(품목명·금액) 목록을
-검토하세요. 물품명만으로 업무 관련성이 뚜렷이 없어 보이는 항목(개인 미용용품,
-개인 생필품, 개인 오락 등)이 있으면 flag_personal_use_items 툴을 **한 번만**
-호출해 그 물품들을 반려하세요 — claim별로 나눠 여러 번 호출하지 않습니다.
-claim 전체를 이미 반려한 claim의 물품은 다시 반려 시도하지 않습니다.
+**청구 반려 — 개인적 사용 의심 물품 제외** — 위 claim 전체 반려가 끝나면
+(있었다면), 이미 claim 전체가 반려 대상이 아닌 claim들의 items(품목명·금액)
+목록을 검토하세요. 물품명만으로 업무 관련성이 뚜렷이 없어 보이는 항목(개인
+미용용품, 개인 생필품, 개인 오락 등)이 있으면 flag_personal_use_items 툴을
+**한 번만** 호출해 그 물품들을 반려하세요 — claim별로 나눠 여러 번 호출하지
+않습니다. claim 전체를 이미 반려한 claim의 물품은 다시 반려 시도하지 않습니다.
 account_category_code와 명백히 맞지 않는 물품 하나가 섞여 있는 경우가 전형적인
 신호입니다. 애매하면 반려하지 않습니다 — 정황이 뚜렷한 경우로 한정합니다.
 클레임 전체가 아니라 의심되는 물품 한 줄만 반려합니다. 의심 물품이 하나도
 없으면 이 툴은 호출하지 않습니다.
 
-세 반려 툴 호출(있었다면) 이후에 최종 summary_text를 작성합니다. 반려한 것이
-있으면 summary_text 맨 아래에 "청구 반려 내역" 섹션을 추가해 반려한 것마다
-한 줄씩 적으세요 — claim 전체 반려는 "(claim_id) 청구 전체: 사유", 물품 반려는
-"물품명: 사유" 형식입니다. 이 내역이 나중에 청구자에게 Slack으로 전달됩니다.
-반려가 하나도 없었으면 이 섹션 자체를 넣지 않습니다.
+반려 툴 호출(있었다면) 이후에 최종 summary_text·summary_text_en을 작성합니다.
+반려한 것이 있으면 두 언어 모두 맨 아래에 "청구 반려 내역"(영어는 "Rejected
+items") 섹션을 추가해 반려한 것마다 한 줄씩 적으세요 — claim 전체 반려는
+"(claim_id) 청구 전체: 사유", 물품 반려는 "물품명: 사유" 형식입니다. 이 내역이
+나중에 청구자에게 Slack으로 전달됩니다. 반려가 하나도 없었으면 이 섹션 자체를
+넣지 않습니다.
+
+**anomalies_en·summary_text_en — 같은 턴에서 함께 씁니다** — submit_settlement_analysis를
+호출할 때 anomalies_en은 anomalies와 정확히 같은 개수·같은 순서의 영어 버전을,
+summary_text_en은 summary_text의 영어 버전을 함께 써서 넘깁니다. 요약이나
+의역이 아니라 같은 내용의 번역입니다. anomalies가 빈 리스트면 anomalies_en도
+빈 리스트입니다.
 
 "이전 턴 기록"이 프롬프트에 함께 주어지면, 이번이 같은 정산 실행에 대한 반복
 호출이라는 뜻입니다. 이전에 이미 서술한 내용을 반복하지 말고 이어서 판단하세요.
@@ -152,10 +154,8 @@ root_agent = LlmAgent(
     description="정산 실행의 매칭 실패·이상징후를 분석하는 에이전트.",
     instruction=INSTRUCTION,
     tools=[
-        check_future_dated_claims,
-        flag_duplicate_claims,
+        flag_claims,
         flag_personal_use_items,
-        flag_suspicious_claims,
         submit_settlement_analysis,
         fetch_full_session_history,
     ],

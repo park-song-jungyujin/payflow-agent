@@ -29,11 +29,11 @@ def make_before_tool_callback(agent_name: str):
         counts[tool.name] = count
         tool_context.state[_CALL_COUNTS_KEY] = counts
 
-        # 기본값 5 — executor의 flag_personal_use_items(청구 반려 자동화) 추가로
-        # check_future_dated_claims + flag_personal_use_items(배치 1회) +
-        # submit_settlement_analysis = 3회가 정상 경로다. 3이면 LLM이 한 번만
-        # 어긋나도(예: 배치 대신 claim별로 나눠 호출) submit이 거부돼 "분석
-        # 시작 실패"로 이어졌다 — 여유를 둔다(docs/journal 2026-08-25 §24 후속).
+        # 기본값 5 — executor는 flag_claims(claim 전체 반려, 배치 1회) +
+        # flag_personal_use_items(물품 반려, 배치 1회) + submit_settlement_analysis
+        # = 3회가 정상 경로다. 3이면 LLM이 한 번만 어긋나도(예: 배치 대신
+        # claim별로 나눠 호출) submit이 거부돼 "분석 시작 실패"로 이어졌다 —
+        # 여유를 둔다(docs/journal 2026-08-25 §24 후속).
         max_calls = int(os.environ.get("AGENT_TOOL_MAX_CALLS_PER_SESSION", "5"))
         if count > max_calls:
             reason = f"{tool.name} exceeded AGENT_TOOL_MAX_CALLS_PER_SESSION={max_calls}"

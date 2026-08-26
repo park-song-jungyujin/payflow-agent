@@ -10,6 +10,17 @@ CLAUDE.md: 매칭 실패 판단, 이상징후 서술이 이 에이전트의 일�
 왕복을 만드는 대신 duplicate_groups와 같은 자리에서 읽기만 한다 — 날짜
 산술은 여전히 LLM이 스스로 계산하지 않는다는 원칙은 그대로다, "언제"
 계산하는지만 바뀌었다.
+
+이 에이전트가 작성하는 사람이 읽을 텍스트(anomalies·summary_text·아래 각
+툴의 reason)는 전부 영어다 — 해커톤 제출 요건(README·데모는 영어) 때문에
+같은 날 팀 전체가 사용자 노출 텍스트를 영어로 통일했다(Slack 발송 메시지
+영어 전환과 같은 배경). 이전에는 한국어를 기본으로 쓰고 별도로 영어 버전을
+같이 썼지만, 지금은 그 이중 작성 자체가 없다 — 한 가지 언어만 쓴다.
+
+claim을 사람이 읽을 텍스트 안에서 가리켜야 할 때는 claim_id(ULID, 매우 길다)
+대신 candidate_claims에 실려 오는 short_id(claim_id 마지막 8자, api가
+미리 잘라 보낸다)를 쓴다 — web은 claim_id를 아예 보여주지 않으므로 이건
+순수하게 여러 반려 항목을 구분해서 읽기 위한 짧은 참조용이다.
 """
 
 from google.adk.tools.tool_context import ToolContext
@@ -40,9 +51,10 @@ def flag_personal_use_items(
         - claim_id: 그 물품이 속한 claim의 claim_id.
         - item_index: candidate_claims에서 그 claim의 items 배열 안 위치(0부터
           시작).
-        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 한국어 사유. "개인
-          사용으로 추정" 같은 모호한 문구 대신 물품명·맥락을 근거로 구체적으로
-          쓴다(예: "샴푸는 사무용품 영수증에 섞인 개인 생필품으로 보입니다").
+        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 영어 사유. "seems
+          personal" 같은 모호한 문구 대신 물품명·맥락을 근거로 구체적으로
+          쓴다(예: "Shampoo appears to be a personal item mixed into an
+          office-supply receipt.").
 
     반환: {"status": "ok", "results": [...]} — results의 각 항목은
         {"claim_id", "item_index", "status", ...}. 일부만 실패해도(잘못된
@@ -83,16 +95,17 @@ def flag_claims(
         신호. candidate_claims(tool_context.state)에서 각 claim_id의 items를
         찾아 전부 반려 대상에 넣는다 — item_index를 LLM이 직접 세지 않는다
         (프롬프트에 이미 있는 JSON을 tool call 인자로 재전사하다 배열 원소가
-        문자열로 축약되는 사고가 반복됐던 것과 같은 이유).
+        문자열로 축약되는 사고가 반복됐던 것과 같은 이유). 이 그룹의 반려
+        사유는 코드가 고정 문구로 채운다(아래 참조) — reason을 따로 받지 않는다.
 
     other_rejections: 같은 배치 내 중복(duplicate_groups)·미래 거래일
         (future_dated_claims)로 판정된 claim 목록. "애매한 패턴"(당신의 자유
         판단)은 여기 포함하지 않는다. 각 항목은 다음 두 키를 갖는 dict다.
         - claim_id: 반려할 claim의 claim_id.
-        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 한국어 사유. 어느
-          유형 때문인지 구체적으로 쓴다(예: "같은 가맹점·같은 금액의 다른
-          청구와 중복", "거래일자가 future_dated_claims에 실린 오늘 날짜보다
-          미래").
+        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 영어 사유. 어느
+          유형 때문인지 구체적으로 쓴다(예: "Duplicate of another claim with
+          the same merchant and amount.", "Transaction date is after today,
+          as reported in future_dated_claims.").
 
     두 인자 다 해당하는 claim이 없으면 이 툴을 아예 호출하지 않는다 — 둘 다
     빈 리스트로 넘기지 않는다. 한쪽만 있으면 나머지는 빈 리스트로 둔다.
@@ -127,7 +140,7 @@ def flag_claims(
                     {
                         "claim_id": claim_id,
                         "item_index": item_index,
-                        "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                        "reason": "Automatically rejected — this receipt was already reimbursed in a previous settlement.",
                     }
                 )
         if item_rejections:
@@ -160,26 +173,18 @@ def submit_settlement_analysis(
     settlement_run_id: str,
     task_id: str,
     anomalies: list[str],
-    anomalies_en: list[str],
     summary_text: str,
-    summary_text_en: str,
     tool_context: ToolContext,
 ) -> dict:
     """분석 결과를 api에 기록한다. 분석이 끝나면 반드시 한 번 호출한다.
 
     settlement_run_id: 분석 대상 정산 실행 ID. 프롬프트에 주어진 값을 그대로 쓴다.
     task_id: 프롬프트에 주어진 멱등키. 같은 task_id로 다시 호출하면 이전 기록을 덮어쓴다.
-    anomalies: 이상징후 서술 목록(한국어). 하나도 없으면 빈 리스트 — 그 자체로 정상 결과다.
-    anomalies_en: anomalies와 정확히 같은 개수·같은 순서의 영어 버전. 요약이나
-        의역이 아니라 같은 내용의 번역이다.
-    summary_text: 사람 승인자가 읽을 한국어 종합 요약. 빈 문자열이면 거부된다.
-    summary_text_en: summary_text의 영어 번역. summary_text가 비어있지 않은 한
-        같이 채운다 — 비어있으면 거부된다.
-
-    web 대시보드의 영어 표시는 예전엔 api가 draft를 받는 시점에 Gemma로 별도
-    번역해 채웠지만, 그 순차 호출(최대 15초)이 분석 전체 지연의 큰 부분이었다
-    — 이제 이 툴을 호출하는 같은 턴에서 당신이 직접 두 언어를 함께 써서
-    보낸다(api/src/guards/agent_drafts.py는 이제 그대로 통과시키기만 한다).
+    anomalies: 이상징후 서술 목록, 전부 영어. 하나도 없으면 빈 리스트 — 그 자체로
+        정상 결과다. 특정 claim을 가리켜야 하면 claim_id가 아니라 short_id를
+        쓴다(예: "Duplicate receipt suspected (#AX5K4MF7).").
+    summary_text: 사람 승인자가 읽을 종합 요약, 영어. 빈 문자열이면 거부된다.
+        여기도 claim을 가리킬 때 short_id를 쓴다.
 
     tool_context는 ADK가 자동 주입한다(LLM에는 안 보이는 파라미터) — main.py가
     이 값을 tool_context.state에 남겨 세션 종료 후 확인한다. main.py.executor_analyze는
@@ -190,12 +195,6 @@ def submit_settlement_analysis(
     if not summary_text.strip():
         tool_context.state["executor_submission_status"] = "error"
         return {"status": "error", "detail": "summary_text must not be empty"}
-    if not summary_text_en.strip():
-        tool_context.state["executor_submission_status"] = "error"
-        return {"status": "error", "detail": "summary_text_en must not be empty"}
-    if len(anomalies_en) != len(anomalies):
-        tool_context.state["executor_submission_status"] = "error"
-        return {"status": "error", "detail": "anomalies_en must have the same length as anomalies"}
 
     result = write_agent_draft(
         agent="EXECUTOR",
@@ -204,9 +203,7 @@ def submit_settlement_analysis(
         task_id=task_id,
         payload={
             "anomalies": anomalies,
-            "anomalies_en": anomalies_en,
             "summary_text": summary_text,
-            "summary_text_en": summary_text_en,
         },
     )
     tool_context.state["executor_submission_status"] = "ok"

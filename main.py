@@ -309,6 +309,7 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     duplicate_groups = body.get("duplicate_groups") or []
     exact_duplicate_groups = body.get("exact_duplicate_groups") or []
     org_id = body.get("org_id")
+    force_reanalyze = bool(body.get("force_reanalyze"))
     if not run_id or not task_id or candidate_claims is None:
         raise HTTPException(
             status_code=400,
@@ -331,8 +332,12 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     # close_session은 아래에서 submit_settlement_analysis 성공 확인 후에만 부른다 —
     # 즉 CLOSED는 "draft가 실제로 써졌다"는 뜻이다. Cloud Tasks 재시도가 이미 성공한
     # run_id로 다시 들어오면, 다시 분석을 태우지 않고 그대로 200을 반환한다.
-    if session.status == "CLOSED":
+    # force_reanalyze는 web "재시도" 버튼 전용 신호다 — 사람이 명시적으로 재분석을
+    # 요청한 것이므로 CLOSED를 풀고 다시 태운다(routes.py retry_executor_analysis_route).
+    if session.status == "CLOSED" and not force_reanalyze:
         return {"status": "ok"}
+    if session.status == "CLOSED" and force_reanalyze:
+        session.status = "ACTIVE"
     prior_turns = _render_prior_turns(
         session.turns,
         empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)",

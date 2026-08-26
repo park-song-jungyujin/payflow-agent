@@ -150,6 +150,52 @@ def test_executor_analyze_short_circuits_when_session_already_closed(client, mon
     assert resp.json() == {"status": "ok"}
 
 
+def test_executor_analyze_force_reanalyze_reopens_closed_session(client, monkeypatch):
+    """web "재시도" 버튼이 force_reanalyze=True를 보내면, 이미 CLOSED인 세션이라도
+    다시 분석을 태운다 — 사람이 명시적으로 재분석을 요청한 것이므로 Cloud Tasks
+    중복 배달과는 구분해야 한다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+
+    class _ClosedSession:
+        turns = []
+        status = "CLOSED"
+
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _ClosedSession())
+
+    appended = []
+
+    def fake_append_turn(session, **kw):
+        appended.append((session.status, kw))
+        return session
+
+    monkeypatch.setattr(main, "append_turn", fake_append_turn)
+    monkeypatch.setattr(main, "find_similar_sessions", lambda *a, **kw: [])
+
+    async def fake_run_once(agent, session_id, prompt, state=None):
+        return "재분석 완료", {}
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+    monkeypatch.setattr(main, "write_agent_draft", lambda **kw: {"draft_id": "drf_1"})
+
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+            "force_reanalyze": True,
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert resp.status_code == 200
+    # 재분석이 실제로 태워졌다 — CLOSED에서 바로 200을 반환하고 끝났다면 append_turn이
+    # 전혀 호출되지 않았을 것이다.
+    assert appended
+    assert appended[0][0] == "ACTIVE"
+
+
 def test_executor_analyze_missing_fields_rejected(client, monkeypatch):
     monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
     resp = client.post(

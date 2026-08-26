@@ -10,6 +10,11 @@ CLAUDE.md: 매칭 실패 판단, 이상징후 서술이 이 에이전트의 일�
 왕복을 만드는 대신 duplicate_groups와 같은 자리에서 읽기만 한다 — 날짜
 산술은 여전히 LLM이 스스로 계산하지 않는다는 원칙은 그대로다, "언제"
 계산하는지만 바뀌었다.
+
+claim을 사람이 읽을 텍스트 안에서 가리켜야 할 때는 claim_id(ULID, 매우 길다)
+대신 candidate_claims에 실려 오는 short_id(claim_id 마지막 8자, api가
+미리 잘라 보낸다)를 쓴다 — web은 claim_id를 아예 보여주지 않으므로 이건
+순수하게 여러 반려 항목을 구분해서 읽기 위한 짧은 참조용이다.
 """
 
 from google.adk.tools.tool_context import ToolContext
@@ -95,7 +100,8 @@ def flag_claims(
           (사용자 노출 텍스트는 전부 영어다 — schema-contract.md §9). 어느
           유형 때문인지 구체적으로 쓴다(예: "Duplicate of another claim with
           the same merchant and amount", "Transaction date is later than
-          today's date given in future_dated_claims").
+          today's date given in future_dated_claims"). claim_id 자체가 아니라
+          여기 reason 문장 안에서 다른 claim을 가리켜야 하면 short_id를 쓴다.
 
     두 인자 다 해당하는 claim이 없으면 이 툴을 아예 호출하지 않는다 — 둘 다
     빈 리스트로 넘기지 않는다. 한쪽만 있으면 나머지는 빈 리스트로 둔다.
@@ -174,8 +180,10 @@ def submit_settlement_analysis(
     settlement_run_id: 분석 대상 정산 실행 ID. 프롬프트에 주어진 값을 그대로 쓴다.
     task_id: 프롬프트에 주어진 멱등키. 같은 task_id로 다시 호출하면 이전 기록을 덮어쓴다.
     anomalies: 이상징후 서술 목록(**영어**). 하나도 없으면 빈 리스트 — 그 자체로
-        정상 결과다.
+        정상 결과다. 특정 claim을 가리켜야 하면 claim_id가 아니라 short_id를
+        쓴다(예: "Duplicate receipt suspected (#AX5K4MF7).").
     summary_text: 사람 승인자가 읽을 종합 요약(**영어**). 빈 문자열이면 거부된다.
+        여기도 claim을 가리킬 때 short_id를 쓴다.
 
     **영어가 기본이다**(schema-contract.md §9) — 해커톤 제출 요건으로 사용자
     노출 텍스트를 팀 전체가 영어로 통일했다. 한국어(anomalies_ko·summary_text_ko)는

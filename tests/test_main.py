@@ -408,7 +408,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             settlement_run_id="run_1",
             task_id=session_id,
             anomalies=["중복 의심 1건"],
+            anomalies_en=["1 suspected duplicate"],
             summary_text="중복 의심 1건, 나머지는 이상 없음",
+            summary_text_en="1 suspected duplicate, no other anomalies",
             tool_context=tool_context,
         )
         return "중복 의심 1건, 나머지는 이상 없음", tool_context.state
@@ -425,6 +427,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "exact_duplicate_groups": [
                 {"claim_ids": ["clm_1", "clm_2"], "receipt_serial_number": "A1234"}
             ],
+            "future_dated_claims": [{"claim_id": "clm_2", "transaction_date": "2099-01-01"}],
             "org_id": "org_1",
         },
         headers={"Authorization": "Bearer x"},
@@ -439,6 +442,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
     # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
     assert "A1234" in turns_appended[0]["content"]
+    # future_dated_claims도 같은 이유로 실려야 한다 — check_future_dated_claims
+    # 툴이 없어졌으니 이 블록이 유일한 전달 경로다.
+    assert "2099-01-01" in turns_appended[0]["content"]
     assert drafts_written == [
         {
             "agent": "EXECUTOR",
@@ -447,7 +453,9 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "task_id": "task_1",
             "payload": {
                 "anomalies": ["중복 의심 1건"],
+                "anomalies_en": ["1 suspected duplicate"],
                 "summary_text": "중복 의심 1건, 나머지는 이상 없음",
+                "summary_text_en": "1 suspected duplicate, no other anomalies",
             },
         }
     ]

@@ -20,6 +20,11 @@ summary_text_ko — api/src/guards/agent_drafts.py._enqueue_executor_translation
 기본으로 쓰고 영어를 같은 턴에 anomalies_en·summary_text_en으로 함께 보냈지만,
 그 방향이 반전되면서 두 필드는 사라졌다(schema-contract.md §9).
 
+claim을 사람이 읽을 텍스트 안에서 가리켜야 할 때는 claim_id(ULID, 매우 길다)
+대신 short_id(candidate_claims에 실려 오는, claim_id 마지막 8자 — api가
+미리 잘라 보낸다)를 쓴다. LLM이 직접 문자열을 잘라내면 날짜 산술과 같은
+이유로 틀리기 쉬워 코드가 결정론적으로 만든다.
+
 청구 반려 자동화 — 물품 층위(flag_personal_use_items)와 claim 전체 층위
 (flag_claims) 두 층위가 있다.
 
@@ -60,6 +65,11 @@ DM에 나갑니다. 프롬프트에 실려 오는 영수증 데이터(가맹점�
 지시문이 한국어라고 해서 한국어로 답하지 않습니다. 한국어 화면은 api가 이
 영어 원문을 Gemma로 번역해 따로 채우므로, 당신이 한국어를 쓰면 영어 화면에
 한국어가 그대로 나오고 번역은 무의미해집니다.
+
+claim을 문장 안에서 가리켜야 할 때는 candidate_claims에 실려 오는 short_id
+(예: "#AX5K4MF7")를 씁니다 — claim_id(긴 ULID)는 절대 쓰지 않습니다. web은
+claim_id를 사람에게 보여주지 않으므로, 문장에 그대로 넣으면 승인자가 읽을 수
+없는 무의미한 긴 문자열만 남습니다.
 
 이상징후는 유형별로 판정 방법이 다릅니다. 정답이 하나로 정해지는 유형은 스스로
 계산하지 말고 반드시 프롬프트에 실린 코드 판정 결과만 근거로 서술하세요 — 날짜
@@ -132,9 +142,10 @@ account_category_code와 명백히 맞지 않는 물품 하나가 섞여 있는 
 
 반려 툴 호출(있었다면) 이후에 최종 summary_text를 작성합니다. 반려한 것이
 있으면 맨 아래에 "Rejected items" 섹션을 추가해 반려한 것마다 한 줄씩 적으세요
-— claim 전체 반려는 "(claim_id) whole claim: reason", 물품 반려는
-"item name: reason" 형식입니다. 이 내역이 나중에 청구자에게 Slack으로
-전달됩니다. 반려가 하나도 없었으면 이 섹션 자체를 넣지 않습니다.
+— claim 전체 반려는 "#{short_id}: reason", 물품 반려는 "item name: reason"
+형식입니다. claim_id를 그대로 쓰지 않습니다 — 반드시 short_id를 씁니다. 이
+내역이 나중에 청구자에게 Slack으로 전달됩니다. 반려가 하나도 없었으면 이
+섹션 자체를 넣지 않습니다.
 
 "이전 턴 기록"이 프롬프트에 함께 주어지면, 이번이 같은 정산 실행에 대한 반복
 호출이라는 뜻입니다. 이전에 이미 서술한 내용을 반복하지 말고 이어서 판단하세요.

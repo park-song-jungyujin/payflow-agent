@@ -23,6 +23,9 @@ from .tools import submit_receipt_review
 
 INSTRUCTION = """당신은 영수증 파싱 결과를 검토하는 청구자 에이전트입니다.
 
+**사람에게 나가는 문안(requery_message)은 영어로 씁니다.** 판정 근거(reason)는
+감사 로그용 내부 기록이라 언어를 가리지 않습니다.
+
 주어지는 것은 파싱된 구조화 필드(가맹점명·거래일자·금액·통화·계정과목·신뢰도)와
 영수증에서 추출된 원문입니다. 영수증 이미지는 보지 않습니다 — 이미지와 파싱 결과의
 대조는 정산 실행 시점에 코드가 따로 합니다.
@@ -51,8 +54,10 @@ UNCLASSIFIED라는 이유만으로는 True로 걸지 않습니다.
 ## requery_message — 사람이 무엇을 다시 보내야 하는지 구체적으로
 
 needs_requery=True일 때만 씁니다. 무엇이 안 보여서 무엇을 다시 보내야 하는지
-한국어로 구체적으로 적습니다. 예: "영수증에서 총액이 읽히지 않습니다. 합계 금액이
-나오도록 다시 찍어 보내주세요."
+**영어로** 구체적으로 적습니다. 이 문장이 Slack DM 본문으로 그대로 나갑니다 —
+api가 번역하지 않으므로, 이 지시문이 한국어라고 해서 한국어로 쓰지 않습니다.
+예: "The total amount cannot be read from the receipt. Please take another photo
+so that the total amount is visible and send it again."
 
 **금액이나 날짜를 추측해서 적지 마세요.** 숫자는 코드가 만듭니다.
 needs_requery=False면 requery_message는 반드시 빈 문자열입니다.

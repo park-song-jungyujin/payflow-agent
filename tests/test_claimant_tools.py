@@ -62,7 +62,7 @@ def test_message_without_requery_rejected(monkeypatch):
         task_id="task_1",
         needs_requery=False,
         is_business=True,
-        requery_message="다시 보내주세요",
+        requery_message="Please send it again",
         reason="정상 파싱",
     )
 
@@ -107,13 +107,16 @@ def test_requery_with_message_writes_draft(monkeypatch):
         task_id="task_1",
         needs_requery=True,
         is_business=True,
-        requery_message="총액이 나오게 다시 찍어 보내주세요",
+        requery_message="Please retake the photo so the total amount is visible",
         reason="parsed_amount_minor가 null이다",
     )
 
     assert result["status"] == "ok"
     assert calls[0]["payload"]["needs_requery"] is True
-    assert calls[0]["payload"]["requery_message"] == "총액이 나오게 다시 찍어 보내주세요"
+    assert (
+        calls[0]["payload"]["requery_message"]
+        == "Please retake the photo so the total amount is visible"
+    )
 
 
 def test_missing_draft_id_in_response_returns_none_not_crash(monkeypatch):

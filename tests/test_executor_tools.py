@@ -235,6 +235,75 @@ def test_flag_duplicate_claims_never_raises_when_api_call_fails(monkeypatch):
     }
 
 
+# --- flag_suspicious_claims — 청구 전체 반려 자동화 (같은 배치 내 중복·미래 거래일) ---
+
+
+def test_flag_suspicious_claims_rejects_without_calling_api_when_empty(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tools, "reject_claims", lambda **kw: calls.append(kw) or {})
+
+    result = tools.flag_suspicious_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert result == {"status": "error", "detail": "rejections must not be empty"}
+    assert calls == []
+
+
+def test_flag_suspicious_claims_forwards_rejections_to_api(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tools,
+        "reject_claims",
+        lambda **kw: calls.append(kw)
+        or {"results": [{"claim_id": "clm_1", "status": "ok", "excluded": True}]},
+    )
+
+    result = tools.flag_suspicious_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[{"claim_id": "clm_1", "reason": "동일 영수증 재제출 의심"}],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert calls == [
+        {
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "rejections": [{"claim_id": "clm_1", "reason": "동일 영수증 재제출 의심"}],
+        }
+    ]
+    assert result == {
+        "status": "ok",
+        "results": [{"claim_id": "clm_1", "status": "ok", "excluded": True}],
+    }
+
+
+def test_flag_suspicious_claims_never_raises_when_api_call_fails(monkeypatch):
+    """flag_personal_use_items와 같은 이유 — 반려 실패로 submit_settlement_analysis
+    호출까지 막히면 안 된다."""
+
+    def boom(**kw):
+        raise RuntimeError("settlement_run status is APPROVED, expected DRAFT")
+
+    monkeypatch.setattr(tools, "reject_claims", boom)
+
+    result = tools.flag_suspicious_claims(
+        settlement_run_id="run_1",
+        task_id="task_1",
+        rejections=[{"claim_id": "clm_1", "reason": "x"}],
+        tool_context=_FakeToolContext(),
+    )
+
+    assert result == {
+        "status": "error",
+        "detail": "settlement_run status is APPROVED, expected DRAFT",
+    }
+
+
 def test_empty_summary_rejected_without_calling_api(monkeypatch):
     calls = []
     monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})

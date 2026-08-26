@@ -142,12 +142,12 @@ def test_flag_claims_already_settled_rejects_every_item_in_the_claim(monkeypatch
                 {
                     "claim_id": "clm_1",
                     "item_index": 0,
-                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                    "reason": "Automatically rejected: confirmed re-submission of a receipt that was already paid out",
                 },
                 {
                     "claim_id": "clm_1",
                     "item_index": 1,
-                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                    "reason": "Automatically rejected: confirmed re-submission of a receipt that was already paid out",
                 },
             ],
         }
@@ -299,55 +299,13 @@ def test_empty_summary_rejected_without_calling_api(monkeypatch):
         settlement_run_id="run_1",
         task_id="task_1",
         anomalies=[],
-        anomalies_en=[],
         summary_text="   ",
-        summary_text_en="",
         tool_context=tool_context,
     )
 
     assert result == {"status": "error", "detail": "summary_text must not be empty"}
     assert calls == []
     # main.py.executor_analyze가 이 값으로 draft가 실제로 안 써졌음을 판단한다.
-    assert tool_context.state["executor_submission_status"] == "error"
-
-
-def test_empty_summary_en_rejected_without_calling_api(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})
-    tool_context = _FakeToolContext()
-
-    result = tools.submit_settlement_analysis(
-        settlement_run_id="run_1",
-        task_id="task_1",
-        anomalies=[],
-        anomalies_en=[],
-        summary_text="이상 없음",
-        summary_text_en="   ",
-        tool_context=tool_context,
-    )
-
-    assert result == {"status": "error", "detail": "summary_text_en must not be empty"}
-    assert calls == []
-    assert tool_context.state["executor_submission_status"] == "error"
-
-
-def test_anomalies_en_length_mismatch_rejected_without_calling_api(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tools, "write_agent_draft", lambda **kw: calls.append(kw) or {})
-    tool_context = _FakeToolContext()
-
-    result = tools.submit_settlement_analysis(
-        settlement_run_id="run_1",
-        task_id="task_1",
-        anomalies=["중복 청구 의심"],
-        anomalies_en=[],
-        summary_text="중복 의심 1건",
-        summary_text_en="1 suspected duplicate",
-        tool_context=tool_context,
-    )
-
-    assert result == {"status": "error", "detail": "anomalies_en must have the same length as anomalies"}
-    assert calls == []
     assert tool_context.state["executor_submission_status"] == "error"
 
 
@@ -363,26 +321,23 @@ def test_empty_anomalies_list_is_valid(monkeypatch):
         settlement_run_id="run_1",
         task_id="task_1",
         anomalies=[],
-        anomalies_en=[],
-        summary_text="이상 없음",
-        summary_text_en="No anomalies found",
+        summary_text="No anomalies found",
         tool_context=tool_context,
     )
 
     assert result == {"status": "ok", "draft_id": "drf_task_1"}
     assert calls[0]["payload"] == {
         "anomalies": [],
-        "anomalies_en": [],
-        "summary_text": "이상 없음",
-        "summary_text_en": "No anomalies found",
+        "summary_text": "No anomalies found",
     }
     assert tool_context.state["executor_submission_status"] == "ok"
 
 
-def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
-    """anomalies_en·summary_text_en은 이제 이 에이전트가 같은 턴에서 직접 쓴다 —
-    api는 더 이상 Gemma로 번역하지 않고 payload를 그대로 통과시킨다
-    (api/src/guards/agent_drafts.py)."""
+def test_valid_analysis_writes_english_only_draft(monkeypatch):
+    """anomalies·summary_text는 영어가 기본이다(schema-contract.md §9) — api가
+    이 payload를 영어 그대로 커밋하고, 한국어(anomalies_ko·summary_text_ko)는
+    별도 Cloud Task가 Gemma로 번역해 나중에 채운다. 이 에이전트는 한국어를
+    쓰지도, _en 병행 필드를 보내지도 않는다."""
     calls = []
     monkeypatch.setattr(
         tools, "write_agent_draft", lambda **kw: calls.append(kw) or {"draft_id": "drf_task_1"}
@@ -391,10 +346,8 @@ def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
     result = tools.submit_settlement_analysis(
         settlement_run_id="run_1",
         task_id="task_1",
-        anomalies=["같은 가맹점 · 같은 금액 · 3분 간격 청구 2건"],
-        anomalies_en=["Same merchant, same amount, 2 claims 3 minutes apart"],
-        summary_text="중복 의심 1건, 나머지는 이상 없음",
-        summary_text_en="1 suspected duplicate, no other anomalies",
+        anomalies=["Same merchant, same amount, 2 claims 3 minutes apart"],
+        summary_text="1 suspected duplicate, no other anomalies",
         tool_context=_FakeToolContext(),
     )
 
@@ -406,10 +359,8 @@ def test_valid_analysis_writes_draft_with_expected_shape(monkeypatch):
             "target_id": "run_1",
             "task_id": "task_1",
             "payload": {
-                "anomalies": ["같은 가맹점 · 같은 금액 · 3분 간격 청구 2건"],
-                "anomalies_en": ["Same merchant, same amount, 2 claims 3 minutes apart"],
-                "summary_text": "중복 의심 1건, 나머지는 이상 없음",
-                "summary_text_en": "1 suspected duplicate, no other anomalies",
+                "anomalies": ["Same merchant, same amount, 2 claims 3 minutes apart"],
+                "summary_text": "1 suspected duplicate, no other anomalies",
             },
         }
     ]

@@ -121,7 +121,7 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
             task_id=session_id,
             needs_requery=True,
             is_business=True,
-            requery_message="총액이 나오게 다시 찍어 보내주세요",
+            requery_message="Please retake the photo so the total amount is visible",
             reason="parsed_amount_minor가 null이다",
         )
         return "금액이 읽히지 않아 재요청으로 판단했습니다", {}
@@ -147,7 +147,7 @@ def test_claimant_pipeline_without_real_llm(client, oidc_ok, monkeypatch):
             "payload": {
                 "needs_requery": True,
                 "is_business": True,
-                "requery_message": "총액이 나오게 다시 찍어 보내주세요",
+                "requery_message": "Please retake the photo so the total amount is visible",
                 "reason": "parsed_amount_minor가 null이다",
             },
         }

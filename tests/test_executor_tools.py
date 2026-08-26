@@ -38,7 +38,7 @@ def test_flag_personal_use_items_forwards_rejections_to_api(monkeypatch):
     result = tools.flag_personal_use_items(
         settlement_run_id="run_1",
         task_id="task_1",
-        rejections=[{"claim_id": "clm_1", "item_index": 0, "reason": "개인 생필품으로 추정"}],
+        rejections=[tools.ItemRejection(claim_id="clm_1", item_index=0, reason="개인 생필품으로 추정")],
         tool_context=_FakeToolContext(),
     )
 
@@ -68,7 +68,7 @@ def test_flag_personal_use_items_never_raises_when_api_call_fails(monkeypatch):
     result = tools.flag_personal_use_items(
         settlement_run_id="run_1",
         task_id="task_1",
-        rejections=[{"claim_id": "clm_1", "item_index": 0, "reason": "x"}],
+        rejections=[tools.ItemRejection(claim_id="clm_1", item_index=0, reason="x")],
         tool_context=_FakeToolContext(),
     )
 
@@ -186,7 +186,7 @@ def test_flag_claims_other_rejections_forwards_to_api(monkeypatch):
         settlement_run_id="run_1",
         task_id="task_1",
         already_settled_claim_ids=[],
-        other_rejections=[{"claim_id": "clm_1", "reason": "동일 영수증 재제출 의심"}],
+        other_rejections=[tools.ClaimRejection(claim_id="clm_1", reason="동일 영수증 재제출 의심")],
         tool_context=_FakeToolContext(),
     )
 
@@ -227,7 +227,7 @@ def test_flag_claims_combines_both_kinds_in_one_call(monkeypatch):
         settlement_run_id="run_1",
         task_id="task_1",
         already_settled_claim_ids=["clm_1"],
-        other_rejections=[{"claim_id": "clm_2", "reason": "미래 거래일"}],
+        other_rejections=[tools.ClaimRejection(claim_id="clm_2", reason="미래 거래일")],
         tool_context=tool_context,
     )
 
@@ -277,7 +277,7 @@ def test_flag_claims_never_raises_when_other_rejections_api_call_fails(monkeypat
         settlement_run_id="run_1",
         task_id="task_1",
         already_settled_claim_ids=[],
-        other_rejections=[{"claim_id": "clm_1", "reason": "x"}],
+        other_rejections=[tools.ClaimRejection(claim_id="clm_1", reason="x")],
         tool_context=_FakeToolContext(),
     )
 

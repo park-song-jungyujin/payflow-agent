@@ -18,14 +18,26 @@ claim을 사람이 읽을 텍스트 안에서 가리켜야 할 때는 claim_id(U
 """
 
 from google.adk.tools.tool_context import ToolContext
+from pydantic import BaseModel
 
 from shared.api_client import reject_claim_items, reject_claims, write_agent_draft
+
+
+class ItemRejection(BaseModel):
+    claim_id: str
+    item_index: int
+    reason: str
+
+
+class ClaimRejection(BaseModel):
+    claim_id: str
+    reason: str
 
 
 def flag_personal_use_items(
     settlement_run_id: str,
     task_id: str,
-    rejections: list[dict],
+    rejections: list[ItemRejection],
     tool_context: ToolContext,
 ) -> dict:
     """개인적 사용이 의심되는 물품을 청구 반려한다 — 그 물품 가격을 정산 금액에서
@@ -41,7 +53,7 @@ def flag_personal_use_items(
 
     rejections: 반려할 물품 목록. 이번 호출 한 번에 전부 담는다(claim마다
         따로따로 부르지 않는다 — 세션당 툴 호출 횟수 제한에 걸릴 수 있다). 각
-        항목은 다음 세 키를 갖는 dict다.
+        항목은 다음 세 필드를 갖는다.
         - claim_id: 그 물품이 속한 claim의 claim_id.
         - item_index: candidate_claims에서 그 claim의 items 배열 안 위치(0부터
           시작).
@@ -64,7 +76,9 @@ def flag_personal_use_items(
 
     try:
         result = reject_claim_items(
-            settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
+            settlement_run_id=settlement_run_id,
+            task_id=task_id,
+            rejections=[r.model_dump() for r in rejections],
         )
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -75,7 +89,7 @@ def flag_claims(
     settlement_run_id: str,
     task_id: str,
     already_settled_claim_ids: list[str],
-    other_rejections: list[dict],
+    other_rejections: list[ClaimRejection],
     tool_context: ToolContext,
 ) -> dict:
     """claim 전체를 통째로 이번 배치에서 반려한다 — flag_personal_use_items가
@@ -94,7 +108,7 @@ def flag_claims(
 
     other_rejections: 같은 배치 내 중복(duplicate_groups)·미래 거래일
         (future_dated_claims)로 판정된 claim 목록. "애매한 패턴"(당신의 자유
-        판단)은 여기 포함하지 않는다. 각 항목은 다음 두 키를 갖는 dict다.
+        판단)은 여기 포함하지 않는다. 각 항목은 다음 두 필드를 갖는다.
         - claim_id: 반려할 claim의 claim_id.
         - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 **영어** 사유
           (사용자 노출 텍스트는 전부 영어다 — schema-contract.md §9). 어느
@@ -156,7 +170,9 @@ def flag_claims(
         made_call = True
         try:
             result = reject_claims(
-                settlement_run_id=settlement_run_id, task_id=task_id, rejections=other_rejections
+                settlement_run_id=settlement_run_id,
+                task_id=task_id,
+                rejections=[r.model_dump() for r in other_rejections],
             )
             results.extend(result.get("results", []))
         except Exception as e:

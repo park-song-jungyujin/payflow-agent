@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime
 
 from google.adk.tools.tool_context import ToolContext
 
-from shared.api_client import reject_claim_items, write_agent_draft
+from shared.api_client import reject_claim_items, reject_claims, write_agent_draft
 
 
 def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
@@ -94,6 +94,48 @@ def flag_personal_use_items(
 
     try:
         result = reject_claim_items(
+            settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
+        )
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+    return {"status": "ok", "results": result.get("results", [])}
+
+
+def flag_suspicious_claims(
+    settlement_run_id: str,
+    task_id: str,
+    rejections: list[dict],
+    tool_context: ToolContext,
+) -> dict:
+    """중복 청구·동일 영수증 재제출·미래 거래일로 판정된 claim을 통째로 이번
+    배치에서 제외한다 — flag_personal_use_items가 물품 한 줄만 빼는 것과 달리,
+    이건 claim 전체(이 영수증의 청구 전액)를 뺀다. 이상징후 서술이 끝난 뒤,
+    submit_settlement_analysis를 부르기 전에 호출한다.
+
+    대상은 오직 exact_duplicate_groups·duplicate_groups·check_future_dated_claims
+    결과에 있는 claim_id만이다 — "애매한 패턴"(4번 유형, 당신의 자유 판단)은 여기
+    포함하지 않는다. 정답이 하나로 정해지는 세 유형만 자동 반려한다.
+
+    해당하는 claim이 하나도 없으면 이 툴을 아예 호출하지 않는다 — 빈 리스트를
+    넘기지 않는다.
+
+    rejections: 반려할 claim 목록. 이번 호출 한 번에 전부 담는다(flag_personal_use_items와
+        같은 이유 — 세션당 툴 호출 횟수 제한). 각 항목은 다음 두 키를 갖는 dict다.
+        - claim_id: 반려할 claim의 claim_id.
+        - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 한국어 사유. 어느 유형
+          때문인지 구체적으로 쓴다(예: "영수증 고유번호가 clm_xxx와 완전히 일치 —
+          동일 영수증 재제출 의심", "거래일자가 오늘(2026-08-25)보다 미래").
+
+    반환: {"status": "ok", "results": [...]} — results의 각 항목은
+        {"claim_id", "status", ...}. flag_personal_use_items와 같은 이유로 이
+        함수 자체는 예외를 던지지 않는다 — api 호출이 실패해도
+        {"status": "error", ...}를 돌려주고 이상징후 분석은 계속 진행된다.
+    """
+    if not rejections:
+        return {"status": "error", "detail": "rejections must not be empty"}
+
+    try:
+        result = reject_claims(
             settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
         )
     except Exception as e:

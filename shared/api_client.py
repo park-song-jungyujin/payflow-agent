@@ -72,3 +72,14 @@ def reject_claim_items(
         "/agents/executor/reject-items",
         {"settlement_run_id": settlement_run_id, "task_id": task_id, "rejections": rejections},
     )
+
+
+def reject_claims(*, settlement_run_id: str, task_id: str, rejections: list[dict]) -> dict:
+    """청구 전체 반려 자동화 — reject_claim_items와 같은 자리, 대상이 물품 한 줄이
+    아니라 claim 전체(중복 청구·동일 영수증 재제출·미래 거래일)다. api의
+    POST /agents/executor/reject-claims를 부른다 — 이번에도 "어떤 claim을 반려할지"만
+    실어 보내고, 실제로 배치 합계에서 빼는 계산은 api가 한다."""
+    return _post(
+        "/agents/executor/reject-claims",
+        {"settlement_run_id": settlement_run_id, "task_id": task_id, "rejections": rejections},
+    )

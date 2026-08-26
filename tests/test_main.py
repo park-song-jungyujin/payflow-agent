@@ -407,13 +407,11 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
         submit_settlement_analysis(
             settlement_run_id="run_1",
             task_id=session_id,
-            anomalies=["중복 의심 1건"],
-            anomalies_en=["1 suspected duplicate"],
-            summary_text="중복 의심 1건, 나머지는 이상 없음",
-            summary_text_en="1 suspected duplicate, no other anomalies",
+            anomalies=["1 suspected duplicate"],
+            summary_text="1 suspected duplicate, no other anomalies",
             tool_context=tool_context,
         )
-        return "중복 의심 1건, 나머지는 이상 없음", tool_context.state
+        return "1 suspected duplicate, no other anomalies", tool_context.state
 
     monkeypatch.setattr(main, "_run_once", fake_run_once)
 
@@ -452,10 +450,8 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "target_id": "run_1",
             "task_id": "task_1",
             "payload": {
-                "anomalies": ["중복 의심 1건"],
-                "anomalies_en": ["1 suspected duplicate"],
-                "summary_text": "중복 의심 1건, 나머지는 이상 없음",
-                "summary_text_en": "1 suspected duplicate, no other anomalies",
+                "anomalies": ["1 suspected duplicate"],
+                "summary_text": "1 suspected duplicate, no other anomalies",
             },
         }
     ]
@@ -471,7 +467,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert turns_appended[0]["untrusted"] is True
     assert turns_appended[0]["doc_refs"] == ["clm_1", "clm_2"]
     assert turns_appended[1]["untrusted"] is False
-    assert turns_appended[1]["content"] == "중복 의심 1건, 나머지는 이상 없음"
+    assert turns_appended[1]["content"] == "1 suspected duplicate, no other anomalies"
 
 
 def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(client, monkeypatch):

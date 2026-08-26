@@ -172,8 +172,15 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
 
     receipt_id = body.get("receipt_id")
     task_id = body.get("task_id")
+    org_id = body.get("org_id")
     if not receipt_id or not task_id:
         raise HTTPException(status_code=400, detail="receipt_id, task_id required")
+    # org_id 없이 agent_sessions를 쓰면 __unknown 파티션에 뭉쳐 조직 간 세션 요약이
+    # 새어나갈 수 있다(shared/memory.py 경계 원칙) — api는 항상 org_id를 채워
+    # 보내므로(parsing/enqueue.py), 없으면 호출부 버그다. 재시도해도 안 고쳐지니
+    # 400으로 끊어 Cloud Tasks가 무한 재시도하지 않게 한다.
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
 
     # 원문을 못 읽어도 멈추지 않는다 — 구조화 필드만으로도 (a)금액 없음·(b)날짜 없음
     # 판정은 가능하다. 여기서 500을 내면 Cloud Tasks가 재시도하고, 재시도가 계속
@@ -184,7 +191,6 @@ async def claimant_review(body: dict, authorization: str = Header(default="")):
     except ReceiptTextUnavailable as e:
         raw_text = f"(원문을 읽지 못했습니다: {e})"
 
-    org_id = body.get("org_id", "")
     recipient_id = body.get("recipient_id")
     # get_or_create_session·find_prior_session_summary·find_similar_sessions·
     # append_turn·close_session은 전부 동기 Firestore/임베딩 호출이다. async
@@ -302,22 +308,36 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     candidate_claims = body.get("candidate_claims")
     duplicate_groups = body.get("duplicate_groups") or []
     exact_duplicate_groups = body.get("exact_duplicate_groups") or []
+    org_id = body.get("org_id")
+    force_reanalyze = bool(body.get("force_reanalyze"))
     if not run_id or not task_id or candidate_claims is None:
         raise HTTPException(
             status_code=400,
             detail="settlement_run_id, task_id, candidate_claims required",
         )
+    # claimant_review와 같은 이유(shared/memory.py 경계 원칙) — org_id 없이
+    # 재시도해도 안 고쳐지니 400으로 끊는다.
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
 
     # agent_sessions는 entity_id=settlement_run_id 기준이다 — actor_ref를 쓸 자연스러운
     # 값이 없다(정산 실행은 특정 수취인 하나에 묶이지 않는다). 그래서
     # find_prior_session_summary는 부르지 않는다 — 같은 run_id로 다시 호출될 때의
     # 연속성은 get_or_create_session이 같은 세션 문서를 찾아오는 것만으로 충분하다.
-    org_id = body.get("org_id", "")
     # claimant_review와 같은 이유 — 동기 Firestore 호출을 스레드풀로 위임해
     # 이벤트 루프를 블로킹하지 않는다.
     session = await asyncio.to_thread(
         get_or_create_session, AgentType.EXECUTOR, entity_id=run_id, org_id=org_id
     )
+    # close_session은 아래에서 submit_settlement_analysis 성공 확인 후에만 부른다 —
+    # 즉 CLOSED는 "draft가 실제로 써졌다"는 뜻이다. Cloud Tasks 재시도가 이미 성공한
+    # run_id로 다시 들어오면, 다시 분석을 태우지 않고 그대로 200을 반환한다.
+    # force_reanalyze는 web "재시도" 버튼 전용 신호다 — 사람이 명시적으로 재분석을
+    # 요청한 것이므로 CLOSED를 풀고 다시 태운다(routes.py retry_executor_analysis_route).
+    if session.status == "CLOSED" and not force_reanalyze:
+        return {"status": "ok"}
+    if session.status == "CLOSED" and force_reanalyze:
+        session.status = "ACTIVE"
     prior_turns = _render_prior_turns(
         session.turns,
         empty_message="(이전 턴 없음 — 이번이 이 정산 실행의 첫 분석입니다)",
@@ -383,13 +403,15 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
         "그대로 넘기세요."
     )
     final_text, final_state = await _run_once(
-        executor_agent, session_id=task_id, prompt=prompt, state={"org_id": org_id}
+        executor_agent,
+        session_id=task_id,
+        prompt=prompt,
+        state={"org_id": org_id, "candidate_claims": candidate_claims},
     )
     if final_text:
         await asyncio.to_thread(
             append_turn, session, role="OUTPUT", content=final_text, untrusted=False
         )
-    await asyncio.to_thread(close_session, session)
 
     # submit_settlement_analysis가 실제로 write_agent_draft까지 성공했는지 확인한다
     # (executor/tools.py 참조). LLM이 툴을 아예 안 부르거나, before_tool_callback의
@@ -399,7 +421,12 @@ async def executor_analyze(body: dict, authorization: str = Header(default="")):
     # 영원히 안 풀리는 조용한 실패였다. 여기서 명시적으로 FAILED를 기록해 web이
     # "분석을 시작하지 못했습니다"를 보여주게 한다(_executor_analysis가 이미
     # status=FAILED를 처리한다 — set_executor_analysis_status와 같은 payload 형태).
-    if final_state.get("executor_submission_status") != "ok":
+    if final_state.get("executor_submission_status") == "ok":
+        # 성공했을 때만 세션을 닫는다 — 위 CLOSED 단락 가드가 "CLOSED == draft
+        # 확정됨"을 전제하기 때문이다. 실패 시엔 ACTIVE로 남겨 다음 재시도가
+        # get_or_create_session으로 이 세션을 이어받아 다시 시도하게 한다.
+        await asyncio.to_thread(close_session, session)
+    else:
         write_agent_draft(
             agent="EXECUTOR",
             target_type="SETTLEMENT_RUN",

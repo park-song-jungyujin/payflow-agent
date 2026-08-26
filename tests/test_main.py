@@ -95,6 +95,107 @@ def test_claimant_route_requires_receipt_id(client, monkeypatch):
     assert resp.status_code == 400
 
 
+def test_claimant_route_requires_org_id(client, monkeypatch):
+    """org_id 없이 agent_sessions를 쓰면 __unknown 파티션에 뭉쳐 조직 간 세션 요약이
+    샐 수 있다 — 재시도해도 안 고쳐지는 호출부 버그라 400으로 끊는다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+    resp = client.post(
+        "/agents/claimant/review",
+        json={"receipt_id": "rct_1", "task_id": "task_1"},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_executor_analyze_requires_org_id(client, monkeypatch):
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_executor_analyze_short_circuits_when_session_already_closed(client, monkeypatch):
+    """CLOSED는 이 라우트에서만 "draft 확정됨"을 뜻한다(성공 시에만 close_session을
+    부르도록 재배치했으므로). 이미 CLOSED인 run_id로 재시도가 들어오면(Cloud Tasks
+    중복 배달 등) 분석을 다시 태우지 않고 그대로 200을 반환한다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+
+    class _ClosedSession:
+        turns = []
+        status = "CLOSED"
+
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _ClosedSession())
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("이미 CLOSED인 세션이면 에이전트를 다시 실행하면 안 된다")
+
+    monkeypatch.setattr(main, "_run_once", _boom)
+    monkeypatch.setattr(main, "append_turn", _boom)
+
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_executor_analyze_force_reanalyze_reopens_closed_session(client, monkeypatch):
+    """web "재시도" 버튼이 force_reanalyze=True를 보내면, 이미 CLOSED인 세션이라도
+    다시 분석을 태운다 — 사람이 명시적으로 재분석을 요청한 것이므로 Cloud Tasks
+    중복 배달과는 구분해야 한다."""
+    monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
+
+    class _ClosedSession:
+        turns = []
+        status = "CLOSED"
+
+    monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _ClosedSession())
+
+    appended = []
+
+    def fake_append_turn(session, **kw):
+        appended.append((session.status, kw))
+        return session
+
+    monkeypatch.setattr(main, "append_turn", fake_append_turn)
+    monkeypatch.setattr(main, "find_similar_sessions", lambda *a, **kw: [])
+
+    async def fake_run_once(agent, session_id, prompt, state=None):
+        return "재분석 완료", {}
+
+    monkeypatch.setattr(main, "_run_once", fake_run_once)
+    monkeypatch.setattr(main, "write_agent_draft", lambda **kw: {"draft_id": "drf_1"})
+
+    resp = client.post(
+        "/agents/executor/analyze",
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+            "force_reanalyze": True,
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert resp.status_code == 200
+    # 재분석이 실제로 태워졌다 — CLOSED에서 바로 200을 반환하고 끝났다면 append_turn이
+    # 전혀 호출되지 않았을 것이다.
+    assert appended
+    assert appended[0][0] == "ACTIVE"
+
+
 def test_executor_analyze_missing_fields_rejected(client, monkeypatch):
     monkeypatch.setattr(main.id_token, "verify_oauth2_token", lambda *a, **kw: {})
     resp = client.post(
@@ -110,6 +211,7 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
 
     class _FakeSession:
         turns = []
+        status = "ACTIVE"
 
     async def fake_run_once(agent, session_id, prompt, *args, **kwargs):
         return "", {"executor_submission_status": "ok"}
@@ -120,7 +222,12 @@ def test_executor_analyze_empty_candidate_claims_is_valid_request(client, monkey
 
     resp = client.post(
         "/agents/executor/analyze",
-        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+        },
         headers={"Authorization": "Bearer x"},
     )
     assert resp.status_code == 200
@@ -133,6 +240,7 @@ def test_executor_analyze_passes_org_id_to_session(client, monkeypatch):
 
     class _FakeSession:
         turns = []
+        status = "ACTIVE"
 
     org_ids_seen = []
 
@@ -248,6 +356,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
 
     class _FakeSession:
         turns = []
+        status = "ACTIVE"
 
     sessions_fetched = []
     turns_appended = []
@@ -316,6 +425,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
             "exact_duplicate_groups": [
                 {"claim_ids": ["clm_1", "clm_2"], "receipt_serial_number": "A1234"}
             ],
+            "org_id": "org_1",
         },
         headers={"Authorization": "Bearer x"},
     )
@@ -325,7 +435,7 @@ def test_executor_analyze_pipeline_without_real_llm(client, monkeypatch):
     assert sessions_fetched == [(AgentType.EXECUTOR, "run_1")]
     assert "과거 유사 사례: 3턴, 상태 CLOSED" in prompts[0]
     assert "참고용" in prompts[0]
-    assert "org_id: ''" in prompts[0]
+    assert "org_id: 'org_1'" in prompts[0]
     # exact_duplicate_groups가 비신뢰 블록(→ 프롬프트)에 실제로 실렸는지 —
     # body를 조용히 무시하는 경로가 생기면 이 단언이 잡는다.
     assert "A1234" in turns_appended[0]["content"]
@@ -365,10 +475,16 @@ def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(clie
 
     class _FakeSession:
         turns = []
+        status = "ACTIVE"
 
     monkeypatch.setattr(main, "get_or_create_session", lambda *a, **kw: _FakeSession())
     monkeypatch.setattr(main, "append_turn", lambda session, **kw: session)
     monkeypatch.setattr(main, "find_similar_sessions", lambda *a, **kw: [])
+
+    closed_sessions = []
+    monkeypatch.setattr(
+        main, "close_session", lambda session: closed_sessions.append(session) or session
+    )
 
     async def fake_run_once(agent, session_id, prompt, state=None):
         # 모델이 아무 툴도 안 부르고 텍스트만 남기고 끝낸 경우를 재현한다.
@@ -383,7 +499,12 @@ def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(clie
 
     resp = client.post(
         "/agents/executor/analyze",
-        json={"settlement_run_id": "run_1", "task_id": "task_1", "candidate_claims": []},
+        json={
+            "settlement_run_id": "run_1",
+            "task_id": "task_1",
+            "candidate_claims": [],
+            "org_id": "org_1",
+        },
         headers={"Authorization": "Bearer x"},
     )
 
@@ -400,3 +521,6 @@ def test_executor_analyze_marks_failed_when_llm_never_calls_the_submit_tool(clie
             },
         }
     ]
+    # 실패 시 세션을 닫지 않는다 — CLOSED는 "draft 확정됨"이어야, 재시도가
+    # get_or_create_session으로 이 세션을 이어받아 다시 시도할 수 있다.
+    assert closed_sessions == []

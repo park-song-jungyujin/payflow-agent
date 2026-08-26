@@ -23,6 +23,8 @@ def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
     경계 시각을 테스트하기 어렵다)."""
     future_dated = []
     for c in candidate_claims:
+        if not isinstance(c, dict):
+            continue
         txn_date_raw = c.get("transaction_date")
         if not txn_date_raw:
             continue
@@ -35,21 +37,26 @@ def _future_dated(candidate_claims: list[dict], today: date) -> list[dict]:
     return future_dated
 
 
-def check_future_dated_claims(candidate_claims: list[dict]) -> dict:
-    """candidate_claims 중 거래일자가 서버 기준 오늘보다 미래인 건을 찾는다.
+def check_future_dated_claims(tool_context: ToolContext) -> dict:
+    """candidate_claims 중 거래일자가 서버 기준 오늘보다 미래인 건을 찾는다. 인자가
+    없다 — candidate_claims는 main.py가 세션 state에 미리 넣어둔 값을 그대로 쓴다.
 
     이상징후 서술 전에 날짜 관련 판단이 필요하면 반드시 이 툴을 먼저 호출하고,
     그 결과에 있는 claim_id만 "미래 거래일" 이상징후로 서술한다. 이 목록에 없는
     claim을 날짜 이유로 이상징후에 넣지 않는다 — "오늘"의 기준은 이 툴이 반환한
     결과이지 당신의 추정이 아니다.
 
-    candidate_claims: 프롬프트에 주어진 후보 claim 목록을 그대로 넘긴다. 각 항목은
-        최소 claim_id, transaction_date("YYYY-MM-DD" 또는 null)를 갖는다.
+    LLM이 candidate_claims를 인자로 직접 넘기게 하면, 프롬프트에 이미 있는 JSON을
+    tool call 인자로 다시 옮겨적는 과정에서 배열 원소를 객체 대신 문자열로 축약해
+    AttributeError로 죽는 사례가 반복됐다(2026-08-25 hotfix). state에서 직접 읽어
+    이 재전사 자체를 없앤다.
+
     반환: {"today": "YYYY-MM-DD", "future_dated": [{"claim_id": str, "transaction_date": str}, ...]}
         transaction_date가 없는 claim은 판정 대상에서 제외한다(근거 없는 필드는
         비교하지 않는다 — schema-contract.md §2 검증 절 verify_passed와 같은 원칙).
         future_dated가 빈 리스트면 미래 거래일 건이 없다는 뜻이다.
     """
+    candidate_claims = tool_context.state.get("candidate_claims") or []
     today = datetime.now(UTC).date()
     return {"today": today.isoformat(), "future_dated": _future_dated(candidate_claims, today)}
 
@@ -101,20 +108,82 @@ def flag_personal_use_items(
     return {"status": "ok", "results": result.get("results", [])}
 
 
+def flag_duplicate_claims(
+    settlement_run_id: str,
+    task_id: str,
+    claim_ids: list[str],
+    tool_context: ToolContext,
+) -> dict:
+    """이미 송금 완료된 영수증의 재청구로 확인된 claim을 통째로 반려한다 —
+    flag_personal_use_items와 달리 물품을 골라 뽑지 않고, claim에 딸린 모든
+    물품을 한 번에 반려해 정산 금액을 0으로 만든다(claim 자체가 문제이지
+    특정 물품이 문제가 아니므로). 이상징후 서술이 끝난 뒤,
+    submit_settlement_analysis를 부르기 전에 호출한다.
+
+    claim_ids: exact_duplicate_groups 중 `already_settled_claim_ids`가
+        비어있지 않은 그룹의 `claim_ids`(이번 배치 후보)만 넘긴다 — 영수증
+        고유번호가 과거에 이미 송금 완료된 receipt와 완전일치하는, 가장
+        확실한 신호일 때만 자동 반려한다. 같은 배치 안에서만 중복인 경우나
+        미래 거래일은 여기 넣지 않는다 — flag_suspicious_claims의 몫이다.
+
+    candidate_claims(tool_context.state)에서 각 claim_id의 items를 찾아
+    전부 반려 대상에 넣는다 — item_index를 LLM이 직접 세지 않는다
+    (check_future_dated_claims와 같은 이유, 재전사 오류 방지).
+
+    반환: flag_personal_use_items와 같은 형태({"status", "results"}).
+        candidate_claims에 없는 claim_id는 조용히 건너뛴다.
+    """
+    if not claim_ids:
+        return {"status": "error", "detail": "claim_ids must not be empty"}
+
+    candidate_claims = tool_context.state.get("candidate_claims") or []
+    claims_by_id = {
+        c["claim_id"]: c for c in candidate_claims if isinstance(c, dict) and c.get("claim_id")
+    }
+
+    rejections = []
+    for claim_id in claim_ids:
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            continue
+        items = claim.get("items") or []
+        for item_index in range(len(items)):
+            rejections.append(
+                {
+                    "claim_id": claim_id,
+                    "item_index": item_index,
+                    "reason": "이미 송금 완료된 영수증의 재청구로 확인되어 자동 반려됨",
+                }
+            )
+
+    if not rejections:
+        return {"status": "error", "detail": "no items found for the given claim_ids"}
+
+    try:
+        result = reject_claim_items(
+            settlement_run_id=settlement_run_id, task_id=task_id, rejections=rejections
+        )
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+    return {"status": "ok", "results": result.get("results", [])}
+
+
 def flag_suspicious_claims(
     settlement_run_id: str,
     task_id: str,
     rejections: list[dict],
     tool_context: ToolContext,
 ) -> dict:
-    """중복 청구·동일 영수증 재제출·미래 거래일로 판정된 claim을 통째로 이번
-    배치에서 제외한다 — flag_personal_use_items가 물품 한 줄만 빼는 것과 달리,
-    이건 claim 전체(이 영수증의 청구 전액)를 뺀다. 이상징후 서술이 끝난 뒤,
+    """중복 청구(같은 배치 내)·미래 거래일로 판정된 claim을 통째로 이번 배치에서
+    제외한다 — flag_personal_use_items가 물품 한 줄만 빼는 것과 달리, 이건 claim
+    전체(이 영수증의 청구 전액)를 뺀다. 이상징후 서술이 끝난 뒤,
     submit_settlement_analysis를 부르기 전에 호출한다.
 
-    대상은 오직 exact_duplicate_groups·duplicate_groups·check_future_dated_claims
-    결과에 있는 claim_id만이다 — "애매한 패턴"(4번 유형, 당신의 자유 판단)은 여기
-    포함하지 않는다. 정답이 하나로 정해지는 세 유형만 자동 반려한다.
+    대상은 duplicate_groups(같은 배치 내 중복)·check_future_dated_claims 결과에
+    있는 claim_id만이다 — "애매한 패턴"(4번 유형, 당신의 자유 판단)은 여기 포함하지
+    않는다. exact_duplicate_groups 중 already_settled_claim_ids가 있는 그룹은
+    flag_duplicate_claims의 몫이다(이미 송금 완료된 영수증 재청구 — 더 강한 신호라
+    별도 처리).
 
     해당하는 claim이 하나도 없으면 이 툴을 아예 호출하지 않는다 — 빈 리스트를
     넘기지 않는다.
@@ -123,8 +192,8 @@ def flag_suspicious_claims(
         같은 이유 — 세션당 툴 호출 횟수 제한). 각 항목은 다음 두 키를 갖는 dict다.
         - claim_id: 반려할 claim의 claim_id.
         - reason: 사람 승인자와(나중에) 청구자 본인이 읽을 한국어 사유. 어느 유형
-          때문인지 구체적으로 쓴다(예: "영수증 고유번호가 clm_xxx와 완전히 일치 —
-          동일 영수증 재제출 의심", "거래일자가 오늘(2026-08-25)보다 미래").
+          때문인지 구체적으로 쓴다(예: "같은 가맹점·같은 금액의 다른 청구와 중복",
+          "거래일자가 check_future_dated_claims가 알려준 오늘 날짜보다 미래").
 
     반환: {"status": "ok", "results": [...]} — results의 각 항목은
         {"claim_id", "status", ...}. flag_personal_use_items와 같은 이유로 이

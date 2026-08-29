@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-payflow-backend = { git = "https://github.com/park-song-jungyujin/payflow-backend", rev = "v0.3.0" }
+payflow-backend = { git = "https://github.com/payflow737/payflow-backend", rev = "v0.3.0" }
 
 [dependency-groups]
 dev = [

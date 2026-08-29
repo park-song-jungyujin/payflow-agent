@@ -759,7 +759,7 @@ requires-dist = [
     { name = "google-auth", specifier = ">=2.35" },
     { name = "google-cloud-firestore", specifier = ">=2.19" },
     { name = "google-genai", specifier = ">=2.18" },
-    { name = "payflow-backend", git = "https://github.com/park-song-jungyujin/payflow-backend?rev=v0.3.0" },
+    { name = "payflow-backend", git = "https://github.com/payflow737/payflow-backend?rev=v0.3.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "requests", specifier = ">=2.32" },
@@ -772,7 +772,7 @@ dev = [{ name = "pytest", specifier = ">=8.3" }]
 [[package]]
 name = "payflow-backend"
 version = "0.1.0"
-source = { git = "https://github.com/park-song-jungyujin/payflow-backend?rev=v0.3.0#1fe0e42f329c5e074b9806071c8ed40c242c0c8e" }
+source = { git = "https://github.com/payflow737/payflow-backend?rev=v0.3.0#1fe0e42f329c5e074b9806071c8ed40c242c0c8e" }
 dependencies = [
     { name = "fastapi" },
     { name = "google-auth" },
